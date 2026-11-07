@@ -200,6 +200,27 @@ impl PackResources {
             clouds: Arc::new(load_clouds(root)),
             forcefield: Arc::new(load_forcefield(root)),
             custom_sky: Arc::new(horizon_client::custom_sky::CustomSky::load(root)),
+            environments: pack_environments(root),
+        }
+    }
+}
+
+/// The overworld's, Nether's and End's attribute stacks with the Polytone biome and dimension
+/// modifiers of the packs merged at `root` (#11486); `None` when no pack has any. The overlay
+/// root links the vanilla data the stacks start from.
+fn pack_environments(root: &std::path::Path) -> Option<Arc<[Environment; 3]>> {
+    let modifiers = horizon_client::environment::PackModifiers::read(root);
+    if modifiers.is_empty() {
+        return None;
+    }
+    let load = |d: &str| Environment::load_dimension_with(root, d, &modifiers);
+    match (load("overworld"), load("the_nether"), load("the_end")) {
+        (Ok(o), Ok(n), Ok(e)) => Some(Arc::new([o, n, e])),
+        (o, n, e) => {
+            for error in [o.err(), n.err(), e.err()].into_iter().flatten() {
+                log::warn!("pack environment: {error}");
+            }
+            None
         }
     }
 }
