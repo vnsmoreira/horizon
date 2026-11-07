@@ -84,6 +84,7 @@ pub mod pad_glyph;
 pub mod par;
 pub mod particles;
 pub mod poi_sections;
+pub mod polytone_post;
 pub mod post_chain;
 pub mod post_glsl;
 pub mod potent_sulfur;
