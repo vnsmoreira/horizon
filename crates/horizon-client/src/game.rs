@@ -2261,7 +2261,10 @@ impl PackResources {
         light: Arc<LightTables>,
     ) -> Result<Self> {
         let visibility = models::load_visibility(root, assets.registry)?;
-        let tables = Arc::new(MeshTables::new(&assets, &render, facts, visibility)?);
+        let tables = Arc::new(
+            MeshTables::new(&assets, &render, facts, visibility)?
+                .with_polytone_colormaps(root, assets.registry),
+        );
         let item_renderer = horizon_client::item_render::ItemRenderer::load_with_library(
             root,
             render.model_library.clone(),
@@ -16733,6 +16736,7 @@ impl Game<'_> {
                 camera: camera.to_array(),
                 sky_light: i32::from(light >> 4),
                 block_light: i32::from(light & 15),
+                biome: biomes.get(biome).name.clone(),
                 temperature: biomes.get(biome).temperature,
                 downfall: biomes.get(biome).downfall,
             };
@@ -21618,6 +21622,7 @@ fn load_resources(
     }
     let tables = Arc::new(startup::time("pack.mesh_tables", || {
         MeshTables::new(&assets, &render, &facts, visibility)
+            .map(|t| t.with_polytone_colormaps(&root, assets.registry))
     })?);
     let pack_step = startup::step("pack.assemble");
     let pack = PackResources::assemble(
