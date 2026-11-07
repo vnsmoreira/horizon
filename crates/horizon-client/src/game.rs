@@ -2243,6 +2243,9 @@ pub struct PackResources {
     clouds: Arc<(u32, u32, Vec<bool>)>,
     /// misc/forcefield.png: (width, height, RGBA) for the world border wall.
     forcefield: Arc<(u32, u32, Vec<u8>)>,
+    /// The overworld's, Nether's and End's attribute stacks with the packs' Polytone biome and
+    /// dimension modifiers (#11486), when a pack has some: what the frame draws.
+    environments: Option<Arc<[Environment; 3]>>,
 }
 impl PackResources {
     /// Everything a pack overlay at `root` provides, over `assets` and `render`
@@ -2318,6 +2321,27 @@ impl PackResources {
             names: Arc::new(Names::load(root)),
             clouds: Arc::new(load_clouds(root)),
             forcefield: Arc::new(load_forcefield(root)),
+            environments: pack_environments(root),
+        }
+    }
+}
+
+/// The overworld's, Nether's and End's attribute stacks with the Polytone biome and dimension
+/// modifiers of the packs merged at `root` (#11486); `None` when no pack has any. The overlay
+/// root links the vanilla data the stacks start from.
+fn pack_environments(root: &std::path::Path) -> Option<Arc<[Environment; 3]>> {
+    let modifiers = horizon_client::environment::PackModifiers::read(root);
+    if modifiers.is_empty() {
+        return None;
+    }
+    let load = |d: &str| Environment::load_dimension_with(root, d, &modifiers);
+    match (load("overworld"), load("the_nether"), load("the_end")) {
+        (Ok(o), Ok(n), Ok(e)) => Some(Arc::new([o, n, e])),
+        (o, n, e) => {
+            for error in [o.err(), n.err(), e.err()].into_iter().flatten() {
+                log::warn!("pack environment: {error}");
+            }
+            None
         }
     }
 }
@@ -16616,7 +16640,7 @@ impl Game<'_> {
             .get(&(block[0] >> 4, block[2] >> 4))
             .map(|c| c.biome(block[0], block[1], block[2]))
             .unwrap_or(0);
-        let environment = self.dim_environment();
+        let environment = self.view_environment();
         // EnvironmentAttributeProbe: the spatially interpolated biome colours,
         // Gaussian-weighted over the noise biomes around the camera (plains
         // where no chunk is loaded, as ClientLevel.getUncachedNoiseBiome).
@@ -16634,10 +16658,28 @@ impl Game<'_> {
         let water_fog = horizon_client::biome::blend_rgb(&weights, |b| {
             horizon_client::biome::rgb(biomes.get(b).water_fog)
         });
-        // The attribute stack, with the camera's biome mix in the probe's order.
+        // The attribute stack, with the camera's biome mix in the probe's order; the biome
+        // maps as the packs left them.
+        let attributes_of = |b: u16| {
+            let info = biomes.get(b);
+            environment.biome(&info.name).unwrap_or(&info.attributes)
+        };
         let mut blend = horizon_world::environment_system::BiomeBlend::default();
         for &(b, weight) in &weights {
-            blend.accumulate(weight, &biomes.get(b).attributes);
+            blend.accumulate(weight, attributes_of(b));
+        }
+        // The packs' biome post-process group, mixed the same way where they set one.
+        let empty = horizon_world::environment_attributes::AttributeMap::default();
+        let post_of = |b: u16| {
+            environment
+                .biome_post(&biomes.get(b).name)
+                .unwrap_or(&empty)
+        };
+        let mut post_blend = horizon_world::environment_system::BiomeBlend::default();
+        if environment.has_biome_post() {
+            for &(b, weight) in &weights {
+                post_blend.accumulate(weight, post_of(b));
+            }
         }
         let (rain, thunder) = self.view_weather(alpha as f32);
         let mut sky = environment.sample(&horizon_client::environment::Sample {
@@ -16645,7 +16687,9 @@ impl Game<'_> {
             rain,
             thunder,
             blend: Some(&blend),
-            biome: Some(&biomes.get(biome).attributes),
+            biome: Some(attributes_of(biome)),
+            post_blend: Some(&post_blend),
+            post_biome: Some(post_of(biome)),
         });
         self.end_flash_sky(&mut sky, alpha);
         if self.flash > 0 && !self.settings.file.bool("hideLightningFlashes") {
