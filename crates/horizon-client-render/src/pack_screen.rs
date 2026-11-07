@@ -320,6 +320,8 @@ pub enum Action {
     OpenFolder,
     /// The Done button (`onClose`: commit).
     Done,
+    /// Horizon's own: the Pack Options button, shown while a selected pack has Polytone options.
+    Options,
     /// Horizon's own: a Modrinth hit the player picked, to download into the
     /// packs folder. The screen does not know where that is.
     BrowsePick(usize),
@@ -359,6 +361,8 @@ pub struct PackScreen {
     browser_icons: Vec<String>,
     /// Whether that button is drawn at all.
     pub browsing_allowed: bool,
+    /// A selected pack has Polytone options (#11486): the options button shows.
+    pub has_options: bool,
     /// The browser's own search box, separate from the one that filters the
     /// player's installed packs.
     browser_search: TextField,
@@ -440,6 +444,7 @@ impl PackScreen {
             confirm: None,
             browser: None,
             browsing_allowed: false,
+            has_options: false,
             backdrop: Backdrop::None,
             browser_icons: Vec::new(),
             browser_search: {
@@ -608,6 +613,12 @@ impl PackScreen {
         }
         if let Some(action) = self.browser_click(m, x, y) {
             return action;
+        }
+        if self.has_options && self.browser.is_none() {
+            let (bx, by) = self.options_button(m);
+            if d::inside((x as i32, y as i32), bx, by, ADD_SIZE, ADD_SIZE) {
+                return Action::Options;
+            }
         }
         if self.search.contains(x, y) {
             self.search.click(m, x, false);
@@ -992,6 +1003,7 @@ impl PackScreen {
             now_ms,
             [&tr("pack.openFolder"), &tr("gui.done")],
         );
+        self.draw_options_button(&mut out, m, mouse, now_ms);
         self.draw_browser(&mut out, m, mouse, now_ms);
         out
     }
@@ -1363,6 +1375,44 @@ impl PackScreen {
         }
     }
     /// The Add button, just right of the search box.
+    /// The Pack Options button: beside the Add button, or where it would be.
+    fn options_button(&self, m: &Measure) -> (i32, i32) {
+        let (bx, by) = self.add_button(m);
+        if self.browsing_allowed {
+            (bx + ADD_SIZE + 4, by)
+        } else {
+            (bx, by)
+        }
+    }
+    /// The Pack Options button and its tooltip, while a selected pack has options.
+    fn draw_options_button(
+        &self,
+        out: &mut Vec<Draw>,
+        m: &Measure,
+        mouse: (i32, i32),
+        now_ms: i64,
+    ) {
+        if !self.has_options || self.browser.is_some() {
+            return;
+        }
+        let (bx, by) = self.options_button(m);
+        let hover = d::inside(mouse, bx, by, ADD_SIZE, ADD_SIZE);
+        d::button(
+            out,
+            m,
+            &tr("horizon.pack.options"),
+            bx,
+            by,
+            ADD_SIZE,
+            ADD_SIZE,
+            true,
+            hover,
+            now_ms,
+        );
+        if hover {
+            d::tooltip(out, m, &tr("horizon.pack.optionsInfo"), mouse);
+        }
+    }
     fn add_button(&self, m: &Measure) -> (i32, i32) {
         let (sx, sy) = self.header(m)[2];
         // The search box is 15 tall: centre the taller button on it.
