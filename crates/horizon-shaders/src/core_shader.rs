@@ -9,7 +9,10 @@
 //!   into a texture and a sampler object, combined again where the sampler is named;
 //! - the vertex inputs become globals the caller's [`Glue`] fills before the pack's `main`
 //!   (renamed `hz_main`) runs, and `gl_VertexID` reads the glue's expression;
-//! - varyings get locations by name across the stages, the fragment output location 0.
+//! - varyings get locations by name across the stages, the fragment output location 0;
+//! - an integer texel buffer (`uniform isamplerBuffer CloudFaces;`) becomes a storage buffer of
+//!   `int`s, and `texelFetch` on it reads one: wgpu has no texel buffers. The blocks and buffers
+//!   of other pipelines get bindings from 16 up, which [`CoreProgram::other_binding`] answers.
 
 use std::collections::HashSet;
 use std::fmt::Write;
@@ -45,6 +48,9 @@ pub struct Glue<'a> {
     pub finish: &'a str,
     /// The expression `gl_VertexID` reads.
     pub vertex_id: &'a str,
+    /// The blocks and texel buffers of the pipeline beyond vanilla's shared ones (`CloudInfo`,
+    /// `CloudFaces`): the caller binds them at [`CoreProgram::other_binding`].
+    pub others: &'a [&'a str],
 }
 
 /// A pipeline's two stages, validated.
@@ -52,6 +58,18 @@ pub struct Glue<'a> {
 pub struct CoreProgram {
     pub vertex: naga::Module,
     pub fragment: naga::Module,
+    /// The blocks, samplers and texel buffers of other pipelines the stages use, in binding
+    /// order (see [`CoreProgram::other_binding`]).
+    pub others: Vec<String>,
+}
+
+impl CoreProgram {
+    /// The binding a block or texel buffer of another pipeline (`CloudInfo`, `CloudFaces`) got,
+    /// when the stages use it.
+    pub fn other_binding(&self, name: &str) -> Option<u32> {
+        let index = self.others.iter().position(|n| n == name)?;
+        Some(OTHER_BINDINGS + 2 * index as u32)
+    }
 }
 
 /// The shaders of one pipeline (`text.vsh`, `text.fsh`) with vanilla's `defines` for it.
@@ -64,16 +82,24 @@ pub fn translate_core(
     glue: &Glue,
 ) -> Result<CoreProgram, String> {
     const CORE: &str = "minecraft:shaders/core/";
-    let vertex_text = strip_comments(&expand(vertex, CORE, include)?);
-    let fragment_text = strip_comments(&expand(fragment, CORE, include)?);
+    let vertex_text = texel_fetches(&strip_comments(&expand(vertex, CORE, include)?));
+    let fragment_text = texel_fetches(&strip_comments(&expand(fragment, CORE, include)?));
     let mut names = Names::default();
     let vertex_code = rewrite(&vertex_text, ShaderStage::Vertex, glue, &mut names)
         .map_err(|e| format!("vertex shader: {e}"))?;
     let fragment_code = rewrite(&fragment_text, ShaderStage::Fragment, glue, &mut names)
         .map_err(|e| format!("fragment shader: {e}"))?;
-    let vertex = compile(ShaderStage::Vertex, &vertex_code, defines)
+    // The bindings of the other pipelines' blocks and buffers the caller provides.
+    let provided: Vec<u32> = names
+        .other
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| glue.others.contains(&name.as_str()))
+        .map(|(i, _)| OTHER_BINDINGS + 2 * i as u32)
+        .collect();
+    let vertex = compile(ShaderStage::Vertex, &vertex_code, defines, &provided)
         .map_err(|e| format!("vertex shader: {e}"))?;
-    let fragment = compile(ShaderStage::Fragment, &fragment_code, defines)
+    let fragment = compile(ShaderStage::Fragment, &fragment_code, defines, &provided)
         .map_err(|e| format!("fragment shader: {e}"))?;
     let given = locations(&vertex, false);
     if let Some(missing) = locations(&fragment, true)
@@ -84,7 +110,58 @@ pub fn translate_core(
             "the fragment shader reads location {missing}, which the vertex shader doesn't write"
         ));
     }
-    Ok(CoreProgram { vertex, fragment })
+    Ok(CoreProgram {
+        vertex,
+        fragment,
+        others: names.other,
+    })
+}
+
+/// The integer texel buffers a stage declares (`uniform isamplerBuffer` or `usamplerBuffer`).
+fn texel_buffers(text: &str) -> Vec<(String, &'static str)> {
+    text.lines()
+        .flat_map(declaration_lines)
+        .filter_map(declaration)
+        .filter(|d| d.storage == "uniform")
+        .filter_map(|d| match d.ty {
+            "isamplerBuffer" => Some((d.name.to_owned(), "int")),
+            "usamplerBuffer" => Some((d.name.to_owned(), "uint")),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `texelFetch(Buffer, i)` on each integer texel buffer as `hz_fetch_Buffer(i)`, which the
+/// buffer's declaration defines (see `rewrite`).
+fn texel_fetches(text: &str) -> String {
+    let mut out = text.to_owned();
+    for (name, _) in texel_buffers(text) {
+        let mut rewritten = String::with_capacity(out.len());
+        let mut rest = out.as_str();
+        while let Some(at) = rest.find("texelFetch") {
+            rewritten.push_str(&rest[..at]);
+            let after = &rest[at + "texelFetch".len()..];
+            let whole = !rest[..at].chars().next_back().is_some_and(is_ident);
+            let args = after.trim_start().strip_prefix('(').map(str::trim_start);
+            match args.and_then(|a| a.strip_prefix(name.as_str())) {
+                Some(tail)
+                    if whole
+                        && !tail.starts_with(is_ident)
+                        && tail.trim_start().starts_with(',') =>
+                {
+                    write!(rewritten, "hz_fetch_{name}(").unwrap();
+                    rest = &tail.trim_start()[1..];
+                }
+                _ => {
+                    rewritten.push_str("texelFetch");
+                    rest = after;
+                }
+            }
+        }
+        rewritten.push_str(rest);
+        out = rewritten;
+    }
+    out
 }
 
 /// The file with its includes inlined (`#include <ns:path>`, `#include "relative"` and the same
@@ -356,6 +433,24 @@ fn rewrite(
             };
             let qualifiers = decl.qualifiers.join(" ");
             match decl.storage {
+                "uniform" if matches!(decl.ty, "isamplerBuffer" | "usamplerBuffer") => {
+                    let binding = names.other_binding(decl.name);
+                    let (name, scalar) = (
+                        decl.name,
+                        if decl.ty == "isamplerBuffer" {
+                            "int"
+                        } else {
+                            "uint"
+                        },
+                    );
+                    let vector = if scalar == "int" { "ivec4" } else { "uvec4" };
+                    writeln!(
+                        out,
+                        "layout(std430, set = 0, binding = {binding}) readonly buffer hz_buffer_{name} {{ {scalar} hz_data_{name}[]; }};\n\
+                         {vector} hz_fetch_{name}(int i) {{ return {vector}(hz_data_{name}[i], 0, 0, 1); }}"
+                    )
+                    .unwrap();
+                }
                 "uniform" if decl.ty == "sampler2D" => {
                     let binding = SAMPLERS
                         .iter()
@@ -498,7 +593,12 @@ fn rename_main(text: &str) -> String {
 }
 
 /// Parses and validates one stage; errors name the line of the rewritten code.
-fn compile(stage: ShaderStage, code: &str, defines: &[&str]) -> Result<naga::Module, String> {
+fn compile(
+    stage: ShaderStage,
+    code: &str,
+    defines: &[&str],
+    provided: &[u32],
+) -> Result<naga::Module, String> {
     let mut options = Options::from(stage);
     for define in defines {
         options.defines.insert((*define).to_owned(), String::new());
@@ -539,6 +639,13 @@ fn compile(stage: ShaderStage, code: &str, defines: &[&str]) -> Result<naga::Mod
                 .strip_prefix("hz_tex_")
                 .or_else(|| name.strip_prefix("hz_smp_"))
                 .unwrap_or(name);
+            if global
+                .binding
+                .as_ref()
+                .is_some_and(|b| provided.contains(&b.binding))
+            {
+                continue;
+            }
             return Err(format!("{name} is not a block or sampler of this pipeline"));
         }
     }
@@ -609,6 +716,7 @@ mod tests {
         setup: "Position = vec3(hz_pos, 0.0); Color = hz_color; UV0 = hz_uv;",
         finish: "gl_Position.z = 0.5 * gl_Position.w;",
         vertex_id: "hz_vertex_id()",
+        others: &[],
     };
 
     /// 26.3's `text.vsh` and `text.fsh` in shape: `#include`, explicit locations, an extension.
@@ -724,5 +832,56 @@ mod tests {
             include_id("\"../include/fog.glsl\"", "minecraft:shaders/core/").as_deref(),
             Some("minecraft:shaders/include/fog.glsl")
         );
+    }
+
+    /// No vertex attributes: the vertex index alone, as vanilla's clouds draw.
+    const INDEX_ONLY: Glue = Glue {
+        inputs: &[],
+        prelude: "",
+        setup: "",
+        finish: "",
+        vertex_id: "int(gl_VertexIndex)",
+        others: &["CloudInfo", "CloudFaces"],
+    };
+
+    /// 26.3's `clouds.vsh` in shape: a block of its own and an integer texel buffer read with
+    /// `texelFetch`, next to a `sampler2D` read the same way.
+    const CLOUDS_VSH: &str = "#version 330\n#include <minecraft:dynamictransforms.glsl>\n\
+        layout(std140) uniform CloudInfo {\n    vec4 CloudColor;\n    vec3 CloudOffset;\n    vec3 CellSize;\n};\n\
+        uniform isamplerBuffer CloudFaces;\nuniform sampler2D Sampler0;\n\
+        layout(location = 1) out vec4 vertexColor;\n\
+        void main() {\n    int index = (gl_VertexID / 4) * 3;\n\
+            int cellX = texelFetch(CloudFaces, index).r;\n    int flags = texelFetch( CloudFaces ,index + 2).r;\n\
+            vec4 tint = texelFetch(Sampler0, ivec2(0), 0);\n\
+            gl_Position = ModelViewMat * vec4(vec3(cellX, flags, 0) * CellSize + CloudOffset, 1.0);\n\
+            vertexColor = CloudColor * tint;\n}\n";
+    const CLOUDS_FSH: &str = "#version 330\nlayout(location = 1) in vec4 vertexColor;\n\
+        out vec4 fragColor;\nvoid main() {\n    fragColor = vertexColor;\n}\n";
+
+    #[test]
+    fn integer_texel_buffers_become_storage_buffers_with_their_own_bindings() {
+        let program = translate_core(CLOUDS_VSH, CLOUDS_FSH, &[], &include, &INDEX_ONLY)
+            .expect("the clouds shaders translate");
+        // CloudInfo, then CloudFaces, after vanilla's blocks and samplers.
+        let (info, faces) = (
+            program.other_binding("CloudInfo"),
+            program.other_binding("CloudFaces"),
+        );
+        assert_eq!((info, faces), (Some(16), Some(18)));
+        assert_eq!(program.other_binding("Fog"), None);
+        // CloudFaces is a read-only storage buffer of ints; Sampler0 keeps its texture.
+        let storage: Vec<_> = program
+            .vertex
+            .global_variables
+            .iter()
+            .filter(|(_, v)| matches!(v.space, naga::AddressSpace::Storage { .. }))
+            .map(|(_, v)| v.binding.as_ref().map(|b| b.binding))
+            .collect();
+        assert_eq!(storage, [Some(18)]);
+        assert!(program.vertex.global_variables.iter().any(|(_, v)| {
+            v.binding
+                .as_ref()
+                .is_some_and(|b| b.binding == SAMPLERS[0].1)
+        }));
     }
 }
