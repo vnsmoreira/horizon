@@ -178,6 +178,7 @@ impl PackResources {
         biomes: Arc<Biomes>,
         light: Arc<LightTables>,
     ) -> Self {
+        let polytone_particles = pack_particles(root, assets.registry);
         Self {
             layer_names: Arc::new(
                 render
@@ -201,6 +202,7 @@ impl PackResources {
             forcefield: Arc::new(load_forcefield(root)),
             custom_sky: Arc::new(horizon_client::custom_sky::CustomSky::load(root)),
             environments: pack_environments(root),
+            polytone_particles,
         }
     }
 }
@@ -226,4 +228,17 @@ fn pack_environments(root: &std::path::Path) -> Option<Arc<[Environment; 3]>> {
             None
         }
     }
+}
+
+/// The custom particles and block emitters of the packs merged at `root` (#11486); `None` when
+/// no pack has any.
+fn pack_particles(
+    root: &std::path::Path,
+    blocks: &'static horizon_world::registry::BlockRegistry,
+) -> Option<Arc<horizon_client::particles::polytone::Registry>> {
+    let configs = horizon_client::packs::polytone_configs(&horizon_client::packs::Source::Dir(
+        root.to_path_buf(),
+    ));
+    let registry = horizon_client::particles::polytone::Registry::read(root, configs, blocks);
+    (!registry.is_empty()).then(|| Arc::new(registry))
 }
