@@ -63,6 +63,9 @@ pub struct ParticleOptions {
     pub mod_particle: Option<String>,
     /// Pre-1.20.5 entity-effect providers use spawn velocity as RGB; true is the ambient provider.
     pub legacy_entity_effect: Option<bool>,
+    /// The block or item a `BlockParticleOption` or `ItemParticleOption` carries
+    /// (`minecraft:stone`), for resource packs' particle modifier filters.
+    pub source: Option<std::sync::Arc<str>>,
     /// What the Polytone emitter that spawned this custom particle sets on it.
     pub polytone_seed: Option<std::sync::Arc<polytone::Seed>>,
 }
@@ -81,6 +84,7 @@ impl ParticleOptions {
             mod_particle: None,
             legacy_entity_effect: None,
             polytone_seed: None,
+            source: None,
         }
     }
     /// A native mod's `SimpleParticleType`: the sprite set of
@@ -90,6 +94,11 @@ impl ParticleOptions {
             mod_particle: Some(name.into()),
             ..Self::simple(ParticleType::Smoke)
         }
+    }
+    /// These options with the block or item they carry (see `source`).
+    pub fn with_source(mut self, id: &str) -> Self {
+        self.source = Some(std::sync::Arc::from(id));
+        self
     }
     /// `GeyserParticleOptions(type, waterBlocks)`.
     pub fn geyser(ty: ParticleType, water_blocks: i32) -> Self {
@@ -2015,7 +2024,7 @@ impl ParticleEngine {
                     Some(name) => name.clone(),
                     None => format!("minecraft:{}", options.ty.name()),
                 };
-                polytone::modify(registry, &id, &mut particle);
+                polytone::modify(registry, &id, options.source.as_deref(), &mut particle);
             }
             // The provider has drawn, so rejecting here keeps vanilla's RNG order.
             // shortcut: counts live plus queued particles by scanning instead of
