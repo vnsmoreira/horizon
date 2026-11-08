@@ -109,23 +109,40 @@ pub struct CoreShaders {
 pub(super) fn load_shaders(atlas: &mut super::HudAtlas, root: &Path, defaults: &Path) {
     let core = &mut atlas.core;
     core.text = load(root, defaults);
-    core.lines = load_core(
-        root,
-        defaults,
-        "rendertype_lines",
-        &[],
-        &crate::gfx::core_lines::GLUE,
-    );
-    let sky = |name| load_core(root, defaults, name, &[], &crate::gfx::core_sky::GLUE);
-    core.sky = sky("sky");
-    core.stars = sky("stars");
-    // The packs' expression uniforms on it (`shader_modifiers`) are blocks it is given too.
-    let expression_uniforms = crate::polytone_post::ShaderModifiers::read(
+    // The packs' expression uniforms (`shader_modifiers`) are blocks a shader is given too.
+    let modifiers = crate::polytone_post::ShaderModifiers::read(
         root,
         crate::packs::polytone_configs(&crate::packs::Source::Dir(root.to_path_buf())),
-    )
-    .map(|m| m.names(&crate::gfx::core_lightmap::STAGES))
-    .unwrap_or_default();
+    );
+    let given = |stages: &[&str]| -> Vec<String> {
+        modifiers
+            .as_ref()
+            .map(|m| m.names(stages))
+            .unwrap_or_default()
+    };
+    let lines_uniforms = given(&["minecraft:core/rendertype_lines"]);
+    core.lines = load_pair(
+        root,
+        defaults,
+        ("rendertype_lines", "rendertype_lines"),
+        &[],
+        &crate::gfx::core_lines::GLUE,
+        &|block| lines_uniforms.iter().any(|n| n == block),
+    );
+    let sky = |name: &str| {
+        let uniforms = given(&[&format!("minecraft:core/{name}")]);
+        load_pair(
+            root,
+            defaults,
+            (name, name),
+            &[],
+            &crate::gfx::core_sky::GLUE,
+            &|block| uniforms.iter().any(|n| n == block),
+        )
+    };
+    core.sky = sky("sky");
+    core.stars = sky("stars");
+    let lightmap_uniforms = given(&crate::gfx::core_lightmap::STAGES);
     core.lightmap = load_pair(
         root,
         defaults,
@@ -134,7 +151,7 @@ pub(super) fn load_shaders(atlas: &mut super::HudAtlas, root: &Path, defaults: &
         &crate::gfx::core_lightmap::GLUE,
         &|block| {
             block == crate::gfx::core_lightmap::INFO_BLOCK
-                || expression_uniforms.iter().any(|n| n == block)
+                || lightmap_uniforms.iter().any(|n| n == block)
         },
     );
 }

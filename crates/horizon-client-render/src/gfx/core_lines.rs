@@ -36,9 +36,17 @@ pub(super) struct CoreLines {
     secondary: wgpu::RenderPipeline,
     group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
+    /// The packs' expression uniforms the shader reads (`shader_modifiers`).
+    extra: super::expression_blocks::ExpressionBlocks,
 }
 
 impl super::Renderer {
+    /// The resource packs' `core/rendertype_lines` (`CoreShaders::lines`) for the block
+    /// outline, or the built-in one.
+    pub fn set_lines_shader(&mut self, program: Option<&crate::core_shader::CoreProgram>) {
+        let format = self.output.frame.format;
+        self.core_lines = program.and_then(|program| CoreLines::new(&self.device, format, program));
+    }
     /// The vanilla `Globals` block a pack's core shaders read this frame.
     pub(super) fn pack_globals(&self, frame: &super::Frame<'_>) -> [u8; 48] {
         crate::post_chain::Globals {
@@ -84,13 +92,16 @@ impl CoreLines {
                 count: None,
             })
             .collect();
+        let extra = super::expression_blocks::ExpressionBlocks::new(program, &[], 1024);
+        let entries: Vec<wgpu::BindGroupLayoutEntry> =
+            entries.into_iter().chain(extra.layout()).collect();
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Resource pack lines"),
             entries: &entries,
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Resource pack lines uniforms"),
-            size: 1024,
+            size: extra.size().max(1024),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -103,6 +114,10 @@ impl CoreLines {
                     size: wgpu::BufferSize::new(BLOCK_SIZES[i]),
                 }),
             })
+            .collect();
+        let resources: Vec<wgpu::BindGroupEntry> = resources
+            .into_iter()
+            .chain(extra.entries(&uniform))
             .collect();
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Resource pack lines"),
@@ -163,11 +178,22 @@ impl CoreLines {
             secondary,
             group,
             uniform,
+            extra,
         })
     }
 
     pub(super) fn uniform(&self) -> &wgpu::Buffer {
         &self.uniform
+    }
+
+    /// `data` (the pipeline's own blocks) with the frame's expression uniforms after them.
+    pub(super) fn with_blocks(
+        &self,
+        mut data: Vec<u8>,
+        blocks: Option<&std::collections::BTreeMap<String, Vec<u8>>>,
+    ) -> Vec<u8> {
+        self.extra.write(&mut data, blocks);
+        data
     }
 
     /// Draw `edges` (instances of the outline buffer bound at slot 0) with the pack's shader:
