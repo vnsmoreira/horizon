@@ -9,7 +9,10 @@
 //!   into a texture and a sampler object, combined again where the sampler is named;
 //! - the vertex inputs become globals the caller's [`Glue`] fills before the pack's `main`
 //!   (renamed `hz_main`) runs, and `gl_VertexID` reads the glue's expression;
-//! - varyings get locations by name across the stages, the fragment output location 0.
+//! - varyings get locations by name across the stages, the fragment output location 0;
+//! - an integer texel buffer (`uniform isamplerBuffer CloudFaces;`) becomes a read-only storage
+//!   buffer of `int`s, and `texelFetch` on it reads one: wgpu has no texel buffers. Like any
+//!   block a pipeline gives, it is bound at [`other_binding`].
 
 use std::collections::HashSet;
 use std::fmt::Write;
@@ -55,6 +58,49 @@ pub struct CoreProgram {
     /// The blocks and samplers that are none of vanilla's, in binding order: the `i`th is at
     /// [`other_binding`]`(i)` (a sampler's object one after its texture).
     pub other: Vec<String>,
+}
+
+/// The integer texel buffers a stage declares (`uniform isamplerBuffer` or `usamplerBuffer`).
+fn texel_buffers(text: &str) -> Vec<String> {
+    text.lines()
+        .flat_map(declaration_lines)
+        .filter_map(declaration)
+        .filter(|d| d.storage == "uniform" && matches!(d.ty, "isamplerBuffer" | "usamplerBuffer"))
+        .map(|d| d.name.to_owned())
+        .collect()
+}
+
+/// `texelFetch(Buffer, i)` on each integer texel buffer as `hz_fetch_Buffer(i)`, which the
+/// buffer's declaration defines (see `rewrite`).
+fn texel_fetches(text: &str) -> String {
+    let mut out = text.to_owned();
+    for name in texel_buffers(text) {
+        let mut rewritten = String::with_capacity(out.len());
+        let mut rest = out.as_str();
+        while let Some(at) = rest.find("texelFetch") {
+            rewritten.push_str(&rest[..at]);
+            let after = &rest[at + "texelFetch".len()..];
+            let whole = !rest[..at].chars().next_back().is_some_and(is_ident);
+            let args = after.trim_start().strip_prefix('(').map(str::trim_start);
+            match args.and_then(|a| a.strip_prefix(name.as_str())) {
+                Some(tail)
+                    if whole
+                        && !tail.starts_with(is_ident)
+                        && tail.trim_start().starts_with(',') =>
+                {
+                    write!(rewritten, "hz_fetch_{name}(").unwrap();
+                    rest = &tail.trim_start()[1..];
+                }
+                _ => {
+                    rewritten.push_str("texelFetch");
+                    rest = after;
+                }
+            }
+        }
+        rewritten.push_str(rest);
+        out = rewritten;
+    }
+    out
 }
 
 /// `polytone_globals.glsl` (wiki "Extra Shader Uniforms"), for a pack that imports it without
@@ -118,8 +164,12 @@ pub fn translate_core_with(
     provided: &dyn Fn(&str) -> bool,
 ) -> Result<CoreProgram, String> {
     const CORE: &str = "minecraft:shaders/core/";
-    let vertex_text = glsl_fixups::fixups(&strip_comments(&expand(vertex, CORE, include)?));
-    let fragment_text = glsl_fixups::fixups(&strip_comments(&expand(fragment, CORE, include)?));
+    let vertex_text = texel_fetches(&glsl_fixups::fixups(&strip_comments(&expand(
+        vertex, CORE, include,
+    )?)));
+    let fragment_text = texel_fetches(&glsl_fixups::fixups(&strip_comments(&expand(
+        fragment, CORE, include,
+    )?)));
     let mut names = Names::default();
     let vertex_code = rewrite(&vertex_text, ShaderStage::Vertex, glue, &mut names)
         .map_err(|e| format!("vertex shader: {e}"))?;
@@ -423,6 +473,21 @@ fn rewrite(
             };
             let qualifiers = decl.qualifiers.join(" ");
             match decl.storage {
+                "uniform" if matches!(decl.ty, "isamplerBuffer" | "usamplerBuffer") => {
+                    let binding = names.other_binding(decl.name);
+                    let name = decl.name;
+                    let (scalar, vector) = if decl.ty == "isamplerBuffer" {
+                        ("int", "ivec4")
+                    } else {
+                        ("uint", "uvec4")
+                    };
+                    writeln!(
+                        out,
+                        "layout(std430, set = 0, binding = {binding}) readonly buffer hz_buffer_{name} {{ {scalar} hz_data_{name}[]; }};\n\
+                         {vector} hz_fetch_{name}(int i) {{ return {vector}(hz_data_{name}[i], 0, 0, 1); }}"
+                    )
+                    .unwrap();
+                }
                 "uniform" if decl.ty == "sampler2D" => {
                     let binding = SAMPLERS
                         .iter()
@@ -648,6 +713,50 @@ mod glsl_fixups;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 26.3's `clouds.vsh` in shape: a block of its own and an integer texel buffer read with
+    /// `texelFetch`, next to a `sampler2D` read the same way.
+    #[test]
+    fn integer_texel_buffers_become_storage_buffers_the_pipeline_gives() {
+        let vsh = "#version 330\n#include <minecraft:dynamictransforms.glsl>\n\
+            layout(std140) uniform CloudInfo {\n    vec4 CloudColor;\n    vec3 CloudOffset;\n    vec3 CellSize;\n};\n\
+            uniform isamplerBuffer CloudFaces;\nuniform sampler2D Sampler0;\n\
+            layout(location = 1) out vec4 vertexColor;\n\
+            void main() {\n    int index = (gl_VertexIndex / 4) * 3;\n\
+                int cellX = texelFetch(CloudFaces, index).r;\n    int flags = texelFetch( CloudFaces ,index + 2).r;\n\
+                vec4 tint = texelFetch(Sampler0, ivec2(0), 0);\n\
+                gl_Position = ModelViewMat * vec4(vec3(cellX, flags, 0) * CellSize + CloudOffset, 1.0);\n\
+                vertexColor = CloudColor * tint;\n}\n";
+        let fsh = "#version 330\nlayout(location = 1) in vec4 vertexColor;\n\
+            out vec4 fragColor;\nvoid main() {\n    fragColor = vertexColor;\n}\n";
+        let glue = Glue {
+            inputs: &[],
+            prelude: "",
+            setup: "",
+            finish: "",
+            vertex_id: "int(gl_VertexIndex)",
+        };
+        let given = |b: &str| matches!(b, "CloudInfo" | "CloudFaces");
+        let program = translate_core_with(vsh, fsh, &[], &include, &glue, &given)
+            .expect("the clouds shaders translate");
+        assert_eq!(program.other, ["CloudInfo", "CloudFaces"]);
+        // CloudFaces is a read-only storage buffer of ints at its binding; Sampler0 keeps its own.
+        let storage: Vec<_> = program
+            .vertex
+            .global_variables
+            .iter()
+            .filter(|(_, v)| matches!(v.space, naga::AddressSpace::Storage { .. }))
+            .map(|(_, v)| v.binding.as_ref().map(|b| b.binding))
+            .collect();
+        assert_eq!(storage, [Some(other_binding(1))]);
+        assert!(program.vertex.global_variables.iter().any(|(_, v)| {
+            v.binding
+                .as_ref()
+                .is_some_and(|b| b.binding == SAMPLERS[0].1)
+        }));
+        // Not given, the buffer is refused like an unknown block.
+        assert!(translate_core(vsh, fsh, &[], &include, &glue).is_err());
+    }
 
     /// A core shader may import Polytone's globals without the pack shipping them: the built-in
     /// `polytone_globals.glsl` declares the block, given by the pipeline, and its helpers.
