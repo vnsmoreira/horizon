@@ -127,7 +127,10 @@ pub(super) fn load_shaders(atlas: &mut super::HudAtlas, root: &Path, defaults: &
         ("rendertype_lines", "rendertype_lines"),
         &[],
         &crate::gfx::core_lines::GLUE,
-        &|block| lines_uniforms.iter().any(|n| n == block),
+        &|block| {
+            block == crate::gfx::expression_blocks::POLY_GLOBALS
+                || lines_uniforms.iter().any(|n| n == block)
+        },
     );
     let sky = |name: &str| {
         let uniforms = given(&[&format!("minecraft:core/{name}")]);
@@ -137,7 +140,10 @@ pub(super) fn load_shaders(atlas: &mut super::HudAtlas, root: &Path, defaults: &
             (name, name),
             &[],
             &crate::gfx::core_sky::GLUE,
-            &|block| uniforms.iter().any(|n| n == block),
+            &|block| {
+                block == crate::gfx::expression_blocks::POLY_GLOBALS
+                    || uniforms.iter().any(|n| n == block)
+            },
         )
     };
     core.sky = sky("sky");
@@ -151,6 +157,7 @@ pub(super) fn load_shaders(atlas: &mut super::HudAtlas, root: &Path, defaults: &
         &crate::gfx::core_lightmap::GLUE,
         &|block| {
             block == crate::gfx::core_lightmap::INFO_BLOCK
+                || block == crate::gfx::expression_blocks::POLY_GLOBALS
                 || lightmap_uniforms.iter().any(|n| n == block)
         },
     );
