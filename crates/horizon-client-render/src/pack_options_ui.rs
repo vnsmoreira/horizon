@@ -330,6 +330,7 @@ impl PackOptionsUi {
                     hover,
                     focused: false,
                     held: self.dragging == Some(row),
+                    key: None,
                 };
                 shell::row(batch, atlas, &cols, y, &view);
             },
