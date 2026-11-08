@@ -218,6 +218,13 @@ impl PackResources {
                         .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
                 )
             });
+        let shader_modifiers = horizon_client::polytone_post::ShaderModifiers::read(
+            root,
+            horizon_client::packs::polytone_configs(&horizon_client::packs::Source::Dir(
+                root.to_path_buf(),
+            )),
+        )
+        .map(Arc::new);
         let polytone_post = horizon_client::polytone_post::PolytonePost::read(
             root,
             horizon_client::packs::polytone_configs(&horizon_client::packs::Source::Dir(
@@ -250,6 +257,7 @@ impl PackResources {
             environments,
             polytone_particles,
             polytone_post,
+            shader_modifiers,
         }
     }
 }
