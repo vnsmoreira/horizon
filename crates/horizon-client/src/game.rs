@@ -7947,8 +7947,9 @@ impl Game<'_> {
             }
             self.finish_async_particle_culling();
         }
-        // Polytone GPU particles with their own shader: their heightmap (`Sampler1`) every
-        // half second and this frame's records go to the renderer.
+        // Polytone GPU particles: their heightmap every half second (a custom shader's
+        // `Sampler1`, and the surface rain dies under), and the records of the types with their
+        // own shader go to the renderer.
         if let Some(area) = self.particles.polytone_heightmap_due(
             camera,
             horizon_client::gfx::POLYTONE_HEIGHTMAP_SIZE,
@@ -7966,6 +7967,7 @@ impl Game<'_> {
             if let Some(renderer) = &self.renderer {
                 renderer.set_polytone_heightmap(&heights);
             }
+            self.particles.set_polytone_surface(area, &heights);
         }
         let batches = self
             .particles
