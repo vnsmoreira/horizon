@@ -96,8 +96,9 @@ fn rains_at(world: &World, biomes: &Biomes, x: i32, y: i32, z: i32) -> bool {
 }
 
 impl Game<'_> {
-    /// Polytone GPU particles with their own shader: their heightmap (`Sampler1`) every
-    /// half second and this frame's records go to the renderer.
+    /// Polytone GPU particles: their heightmap every half second (a custom shader's
+    /// `Sampler1`, and the surface rain dies under), and the records of the types with their
+    /// own shader go to the renderer.
     pub(super) fn polytone_gpu_particles(&mut self, camera: glam::DVec3, alpha: f64) {
         let world = &self.world;
         if let Some(area) = self.particles.polytone_heightmap_due(
@@ -117,6 +118,7 @@ impl Game<'_> {
             if let Some(renderer) = &self.renderer {
                 renderer.set_polytone_heightmap(&heights);
             }
+            self.particles.set_polytone_surface(area, &heights);
         }
         let batches = self
             .particles

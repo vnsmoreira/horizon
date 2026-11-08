@@ -236,6 +236,7 @@ impl Store {
         partial: f32,
         light_cache: &mut ParticleLightCache,
         light_at: &dyn Fn([i32; 3]) -> u8,
+        surface: Option<&Surface>,
         out: &mut Vec<Vertex>,
         additive: &mut Vec<Vertex>,
     ) {
@@ -308,12 +309,12 @@ impl Store {
                     at[1] + offset[1],
                     at[2] + offset[2] + sway_z,
                 ];
-                let block = ParticleLevel::block_at(world);
-                let packed = light_cache.get(block, light_at);
-                // kill_below_heightmap: under the surface, where the sky doesn't reach.
-                if gpu.kill_below_heightmap && packed >> 4 < 15 {
+                // kill_below_heightmap: under the motion-blocking surface around the camera.
+                if gpu.kill_below_heightmap && surface.is_some_and(|s| s.covers(world)) {
                     continue;
                 }
+                let block = ParticleLevel::block_at(world);
+                let packed = light_cache.get(block, light_at);
                 let block_light = u32::from((packed & 15).max(self.def.light_level));
                 let light = (u32::from(packed >> 4) * 16) | ((block_light * 16) << 8);
                 let center = (DVec3::from_array(world) - camera).as_vec3();
@@ -436,6 +437,32 @@ pub struct HeightmapArea {
     pub min_y: i32,
 }
 
+/// The heightmap's heights on the CPU, for the quads drawn without a custom shader.
+#[derive(Clone, Debug)]
+pub struct Surface {
+    pub area: HeightmapArea,
+    /// `size` × `size` heights above `min_y`, row by row along x.
+    pub heights: Arc<[u16]>,
+}
+
+impl Surface {
+    /// Whether `at` is under the surface of its column; a column outside the area takes its
+    /// nearest edge, as the shaders' clamped sampler does.
+    pub fn covers(&self, at: [f64; 3]) -> bool {
+        let size = self.area.size as i32;
+        if size == 0 || self.heights.len() < (size * size) as usize {
+            return false;
+        }
+        let column = |v: f64, origin: i32| (v.floor() as i32 - origin).clamp(0, size - 1);
+        let (x, z) = (
+            column(at[0], self.area.origin[0]),
+            column(at[2], self.area.origin[1]),
+        );
+        let top = self.area.min_y + i32::from(self.heights[(z * size + x) as usize]);
+        at[1] < f64::from(top)
+    }
+}
+
 /// A type's live records for its own shader, with the block and uniforms of this frame.
 #[derive(Debug)]
 pub struct ShaderBatch {
@@ -515,6 +542,10 @@ impl Orientation {
 }
 
 impl Store {
+    /// Whether this type needs the heightmap: its own shader samples it, or it dies under it.
+    pub(super) fn reads_heightmap(&self) -> bool {
+        self.shader.is_some() || self.gpu.kill_below_heightmap
+    }
     pub(super) fn shader(&self) -> Option<&Arc<GpuShader>> {
         self.shader.as_ref()
     }
@@ -600,6 +631,7 @@ impl super::ParticleEngine {
         if !same {
             self.polytone_gpu.clear();
             self.polytone_heightmap = None;
+            self.polytone_surface = None;
             self.polytone_overrides = registry
                 .iter()
                 .flat_map(|r| {
@@ -617,17 +649,18 @@ impl super::ParticleEngine {
         self.polytone_gpu.iter().map(Store::len).sum()
     }
 
-    /// The heightmap area GPU particle shaders want refilled now (wiki "GPU Particles": the
+    /// The heightmap area GPU particles want refilled now (wiki "GPU Particles": the
     /// motion-blocking heights of `size` columns a side around the camera, every half second),
-    /// with `min_y` the world's bottom; `None` while no live type has a shader or the last one is
-    /// fresh. The caller fills it ([`HeightmapArea`]) and the batches read it.
+    /// with `min_y` the world's bottom; `None` while no live type reads it or the last one is
+    /// fresh. The caller fills it ([`HeightmapArea`]) for the shaders, and
+    /// [`Self::set_polytone_surface`] for the quads drawn here.
     pub fn polytone_heightmap_due(
         &mut self,
         camera: DVec3,
         size: u32,
         min_y: i32,
     ) -> Option<HeightmapArea> {
-        if !self.polytone_gpu.iter().any(|s| s.shader().is_some()) {
+        if !self.polytone_gpu.iter().any(|s| s.reads_heightmap()) {
             return None;
         }
         let now = self.polytone_ticks;
@@ -648,6 +681,14 @@ impl super::ParticleEngine {
         };
         self.polytone_heightmap = Some((area, now));
         Some(area)
+    }
+
+    /// The heights the caller filled for the area [`Self::polytone_heightmap_due`] asked for.
+    pub fn set_polytone_surface(&mut self, area: HeightmapArea, heights: &[u16]) {
+        self.polytone_surface = Some(Surface {
+            area,
+            heights: heights.into(),
+        });
     }
 
     /// The GPU particle types drawn by their own shaders (wiki "GPU Particles"): each one's live
@@ -762,6 +803,32 @@ mod tests {
         assert!(close(fade(0.9, 0.4, 0.2), 0.5));
         assert!(close(fade(1.0, 0.4, 0.2), 0.0));
         assert!(close(fade(0.3, 0.0, 0.0), 1.0));
+    }
+
+    /// Rain dies at the surface of its own column (wiki "GPU Particles": the motion-blocking
+    /// heightmap), not where the sky is shaded: in front of a hill it falls to the grass.
+    #[test]
+    fn the_surface_covers_what_is_below_its_column() {
+        // A 4x4 area from (10, 20), ground at y 64 and one column (x 12, z 21) a hill at 80.
+        let mut heights = vec![64 - (-64); 16];
+        heights[4 + 2] = 80 - (-64);
+        let surface = Surface {
+            area: HeightmapArea {
+                origin: [10, 20],
+                size: 4,
+                min_y: -64,
+            },
+            heights: heights.into_iter().map(|h| h as u16).collect(),
+        };
+        assert!(!surface.covers([11.5, 64.0, 20.5]));
+        assert!(surface.covers([11.5, 63.9, 20.5]));
+        assert!(surface.covers([12.5, 79.0, 21.5]));
+        assert!(!surface.covers([12.5, 80.5, 21.5]));
+        // Beside the hill the drop still falls.
+        assert!(!surface.covers([13.5, 70.0, 21.5]));
+        // Outside the area, the nearest edge column.
+        assert!(surface.covers([40.0, 60.0, 21.5]));
+        assert!(!surface.covers([40.0, 66.0, 21.5]));
     }
 
     #[test]
