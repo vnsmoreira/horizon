@@ -3,6 +3,8 @@
 //! record (position, velocity, spawn time, lifetime, seed, colour, size, roll), and where it is,
 //! how big, what colour and which frame are a function of that record and the time. Here the
 //! function runs when the frame's particle quads are built, beside the engine's own particles.
+//! A type with its own `shader` instead hands its records to that shader ([`ShaderBatch`]),
+//! which computes the quads on the graphics card as the wiki's 1.21.11 format describes.
 use super::{ParticleLevel, ParticleLightCache};
 use crate::hud::Rect;
 use crate::mesher::Vertex;
@@ -95,6 +97,8 @@ struct Record {
     rgba: [f32; 4],
     size: f32,
     roll: f32,
+    /// The initializer's `custom`, for a custom shader (`Params.z`).
+    custom: f32,
 }
 
 /// A GPU particle type's records: a ring of `limit` slots, the oldest overwritten.
@@ -107,6 +111,8 @@ pub(super) struct Store {
     records: Vec<Record>,
     next: usize,
     limit: usize,
+    /// The type's own shader, when it has one that translated.
+    shader: Option<Arc<GpuShader>>,
 }
 
 /// The atlas name of a full texture path: `ns:textures/particle/a/b.png` is `ns:particle/a/b`
@@ -162,7 +168,7 @@ fn motion(gpu: &Gpu, position: [f64; 3], velocity: [f64; 3], t: f64) -> ([f64; 3
 }
 
 impl Store {
-    pub(super) fn new(def: &Arc<CustomParticle>) -> Option<Self> {
+    pub(super) fn new(def: &Arc<CustomParticle>, shader: Option<Arc<GpuShader>>) -> Option<Self> {
         let gpu = def.gpu.clone()?;
         Some(Self {
             def: def.clone(),
@@ -173,6 +179,7 @@ impl Store {
             next: 0,
             // The wiki's default ring capacity.
             limit: def.limit.map_or(16_384, |l| l.max(1) as usize),
+            shader,
         })
     }
 
@@ -181,7 +188,7 @@ impl Store {
     }
 
     /// Records a spawn from a particle its initializer set up (position, motion, life, look).
-    pub(super) fn spawn(&mut self, p: &super::Particle, now: u64, seed: u64) {
+    pub(super) fn spawn(&mut self, p: &super::Particle, custom: f64, now: u64, seed: u64) {
         if p.lifetime <= 0 {
             return;
         }
@@ -194,6 +201,7 @@ impl Store {
             rgba: p.rgba,
             size: p.size,
             roll: p.roll,
+            custom: custom as f32,
         };
         if self.records.len() < self.limit {
             self.records.push(record);
@@ -231,7 +239,7 @@ impl Store {
         out: &mut Vec<Vertex>,
         additive: &mut Vec<Vertex>,
     ) {
-        if self.def.render_type == RenderType::Invisible {
+        if self.def.render_type == RenderType::Invisible || self.shader.is_some() {
             return;
         }
         let Some(&(rect, _)) = atlas.get(&self.sprite) else {
@@ -340,6 +348,342 @@ impl Store {
     }
 }
 
+/// A GPU particle type's own shader (`shader`): its program, texture and `uniforms`.
+pub struct GpuShader {
+    /// The shader's id (`ns:name`), for the log.
+    pub id: String,
+    pub program: Arc<crate::core_shader::CoreProgram>,
+    /// `Sampler0`: the type's `texture` (width, height, RGBA pixels).
+    pub texture: Option<(u32, u32, Arc<[u8]>)>,
+    pub render_type: RenderType,
+    /// Each uniform the pack names, set every frame from its expression.
+    pub uniforms: Vec<(String, horizon_polytone::expr::Program)>,
+}
+
+impl std::fmt::Debug for GpuShader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GpuShader").field("id", &self.id).finish()
+    }
+}
+
+/// What a custom shader's vertex stage reads (wiki "GPU Particles", 1.21.11 and up): the
+/// record, the same on the quad's four corners (`gl_VertexIndex & 3` is the corner).
+pub const GLUE: crate::core_shader::Glue = crate::core_shader::Glue {
+    inputs: &[
+        ("Position", "vec3"),
+        ("Velocity", "vec3"),
+        ("SpawnLife", "vec2"),
+        ("Params", "vec4"),
+        ("Color", "vec4"),
+        ("UV2", "ivec2"),
+    ],
+    prelude: "layout(location = 0) in vec3 hz_position;\n\
+              layout(location = 1) in vec3 hz_velocity;\n\
+              layout(location = 2) in vec2 hz_spawn_life;\n\
+              layout(location = 3) in vec4 hz_params;\n\
+              layout(location = 4) in vec4 hz_color;\n\
+              layout(location = 5) in ivec2 hz_uv2;",
+    setup: "Position = hz_position; Velocity = hz_velocity; SpawnLife = hz_spawn_life; \
+            Params = hz_params; Color = hz_color; UV2 = hz_uv2;",
+    finish: "",
+    vertex_id: "int(gl_VertexIndex)",
+};
+
+/// The include a custom shader imports (`#moj_import <polytone:gpu_particle.glsl>`): the type's
+/// knobs as one std140 block, laid out as [`gpu_block`] writes it.
+pub const GPU_PARTICLE_GLSL: &str = "layout(std140) uniform PolytoneGpuParticle {\n\
+    vec3 Origin;\n    float Time;\n\
+    float Gravity;\n    float Drag;\n    float Sway;\n    float Spin;\n\
+    float SizeEnd;\n    float Aspect;\n    float AlphaCutoff;\n    int Frames;\n\
+    vec2 Fade;\n    int Billboard;\n    int RandomSprite;\n\
+    int UseColorEnd;\n    int KillBelowHeightmap;\n    float CameraY;\n    float HzPad;\n\
+    vec4 ColorEnd;\n\
+    vec4 HeightmapInfo;\n\
+};\n";
+
+/// The include's id as a core shader names it.
+pub const GPU_PARTICLE_INCLUDE: &str = "polytone:shaders/include/gpu_particle.glsl";
+
+/// The block's name in [`GPU_PARTICLE_GLSL`], and its size.
+pub const GPU_BLOCK: &str = "PolytoneGpuParticle";
+pub const GPU_BLOCK_SIZE: usize = 112;
+
+/// One corner of a record for a custom shader.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ShaderVertex {
+    /// Where it spawned, relative to the batch's `Origin`.
+    pub position: [f32; 3],
+    /// Its starting velocity, blocks per tick.
+    pub velocity: [f32; 3],
+    /// The tick it spawned on (on the batch's `Time` clock) and its life in ticks.
+    pub spawn_life: [f32; 2],
+    /// Size (half-width), roll, `custom`, a random seed in 0..1.
+    pub params: [f32; 4],
+    /// RGBA.
+    pub color: [u8; 4],
+    /// The light where it spawned, as vanilla's `UV2`: block light and sky light, times 16.
+    pub uv2: [i32; 2],
+    pad: u32,
+}
+
+/// The heightmap a custom shader samples (`Sampler1`): `size` × `size` columns from the world
+/// column `origin` (x, z), heights above `min_y`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeightmapArea {
+    pub origin: [i32; 2],
+    pub size: u32,
+    pub min_y: i32,
+}
+
+/// A type's live records for its own shader, with the block and uniforms of this frame.
+#[derive(Debug)]
+pub struct ShaderBatch {
+    pub shader: Arc<GpuShader>,
+    pub vertices: Vec<ShaderVertex>,
+    pub block: [u8; GPU_BLOCK_SIZE],
+    pub uniforms: Vec<(String, f32)>,
+}
+
+/// The `polytone:gpu_particle.glsl` block for `gpu`: `origin` relative to the camera, `time` on
+/// the records' clock, the camera's Y and the heightmap's place relative to the camera.
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_block(
+    gpu: &Gpu,
+    render_type: RenderType,
+    billboard: i32,
+    random_sprite: bool,
+    origin: [f32; 3],
+    time: f32,
+    camera: DVec3,
+    heightmap: Option<HeightmapArea>,
+) -> [u8; GPU_BLOCK_SIZE] {
+    let mut floats = [0f32; GPU_BLOCK_SIZE / 4];
+    let int = |v: i32| f32::from_bits(v as u32);
+    floats[..3].copy_from_slice(&origin);
+    floats[3] = time;
+    floats[4] = gpu.gravity as f32;
+    // Drag is `-ln(friction)`: none for a friction of 1 (or out of range).
+    floats[5] = if gpu.friction > 0.0 && gpu.friction < 1.0 {
+        -(gpu.friction.ln()) as f32
+    } else {
+        0.0
+    };
+    floats[6] = gpu.sway as f32;
+    floats[7] = gpu.spin as f32;
+    floats[8] = gpu.size_end.map_or(-1.0, |s| s as f32);
+    floats[9] = gpu.aspect as f32;
+    // Wiki "GPU Particles": the two translucent types blend, anything else is alpha cutout.
+    floats[10] = match render_type {
+        RenderType::Translucent | RenderType::AdditiveTranslucent => 0.0,
+        _ => 0.1,
+    };
+    floats[11] = int(gpu.frames.max(1) as i32);
+    floats[12] = gpu.fade[0] as f32;
+    floats[13] = gpu.fade[1] as f32;
+    floats[14] = int(billboard);
+    floats[15] = int(i32::from(random_sprite));
+    floats[16] = int(i32::from(gpu.color_end.is_some()));
+    floats[17] = int(i32::from(gpu.kill_below_heightmap));
+    floats[18] = camera.y as f32;
+    if let Some(end) = gpu.color_end {
+        let channel = |shift: u32| ((end >> shift) & 0xff) as f32 / 255.0;
+        floats[20..24].copy_from_slice(&[channel(16), channel(8), channel(0), channel(24)]);
+    }
+    if let Some(h) = heightmap {
+        floats[24] = (f64::from(h.origin[0]) - camera.x) as f32;
+        floats[25] = (f64::from(h.origin[1]) - camera.z) as f32;
+        floats[26] = h.size as f32;
+        floats[27] = h.min_y as f32;
+    }
+    let mut bytes = [0u8; GPU_BLOCK_SIZE];
+    bytes.copy_from_slice(bytemuck::cast_slice(&floats));
+    bytes
+}
+
+impl Orientation {
+    /// The `Billboard` a custom shader reads: 0 facing the camera, 1 around Y, 2 flat, 3 along
+    /// its velocity.
+    fn billboard(self) -> i32 {
+        match self {
+            Self::Camera | Self::Fixed => 0,
+            Self::AroundY => 1,
+            Self::Flat => 2,
+            Self::Movement => 3,
+        }
+    }
+}
+
+impl Store {
+    pub(super) fn shader(&self) -> Option<&Arc<GpuShader>> {
+        self.shader.as_ref()
+    }
+
+    /// The live records for the type's own shader at `now + partial` ticks: each quad of an
+    /// `area` its own record, spread over the box. `None` for a type without one.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn shader_batch(
+        &self,
+        camera: DVec3,
+        now: u64,
+        partial: f32,
+        light_cache: &mut ParticleLightCache,
+        light_at: &dyn Fn([i32; 3]) -> u8,
+        heightmap: Option<HeightmapArea>,
+        uniforms: Vec<(String, f32)>,
+    ) -> Option<ShaderBatch> {
+        let shader = self.shader.clone()?;
+        if self.def.render_type == RenderType::Invisible {
+            return None;
+        }
+        // Positions relative to the camera's block, so they stay exact as floats; the clock
+        // from a recent multiple of 65536 ticks, for the same reason.
+        let anchor = camera.floor();
+        let base = now & !0xFFFF;
+        let time = (now - base) as f32 + partial;
+        let (count, area) = self.gpu.area.map_or((1, [0.0; 3]), |(size, n)| (n, size));
+        let mut vertices = Vec::with_capacity(self.records.len() * count as usize * 4);
+        for r in &self.records {
+            let spawn = r.spawn as f32 - base as f32;
+            if time - spawn >= r.lifetime {
+                continue;
+            }
+            for quad in 0..u64::from(count) {
+                let offset: [f64; 3] = if count > 1 {
+                    std::array::from_fn(|i| (unit(r.seed, quad * 8 + i as u64 + 1) - 0.5) * area[i])
+                } else {
+                    [0.0; 3]
+                };
+                let world = DVec3::from_array(r.position) + DVec3::from_array(offset);
+                let packed = light_cache.get(ParticleLevel::block_at(world.to_array()), light_at);
+                let block_light = i32::from((packed & 15).max(self.def.light_level));
+                let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                let vertex = ShaderVertex {
+                    position: (world - anchor).as_vec3().to_array(),
+                    velocity: r.velocity.map(|v| v as f32),
+                    spawn_life: [spawn, r.lifetime],
+                    params: [r.size, r.roll, r.custom, unit(r.seed, quad * 8 + 6) as f32],
+                    color: r.rgba.map(c),
+                    uv2: [block_light * 16, i32::from(packed >> 4) * 16],
+                    pad: 0,
+                };
+                vertices.extend([vertex; 4]);
+            }
+        }
+        let block = gpu_block(
+            &self.gpu,
+            self.def.render_type,
+            self.orientation.billboard(),
+            self.def.random_sprite,
+            (anchor - camera).as_vec3().to_array(),
+            time,
+            camera,
+            heightmap,
+        );
+        Some(ShaderBatch {
+            shader,
+            vertices,
+            block,
+            uniforms,
+        })
+    }
+}
+
+/// The engine's Polytone state: its packs' particle types and the GPU particles' records.
+impl super::ParticleEngine {
+    /// Sets (or clears) the resource packs' Polytone custom particle types.
+    pub fn set_polytone(&mut self, registry: Option<Arc<super::polytone::Registry>>) {
+        let registry = registry.filter(|r| !r.is_empty());
+        let same = match (&self.polytone, &registry) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.polytone_gpu.clear();
+            self.polytone_heightmap = None;
+            self.polytone_overrides = registry
+                .iter()
+                .flat_map(|r| {
+                    super::ParticleType::ALL.iter().filter_map(|&ty| {
+                        let id = format!("minecraft:{}", ty.name());
+                        r.get(&id).is_some().then_some((ty, id))
+                    })
+                })
+                .collect();
+        }
+        self.polytone = registry;
+    }
+    /// Live GPU particle records (spawns, before `area` spreads them), for tests and status.
+    pub fn polytone_gpu_records(&self) -> usize {
+        self.polytone_gpu.iter().map(Store::len).sum()
+    }
+
+    /// The heightmap area GPU particle shaders want refilled now (wiki "GPU Particles": the
+    /// motion-blocking heights of `size` columns a side around the camera, every half second),
+    /// with `min_y` the world's bottom; `None` while no live type has a shader or the last one is
+    /// fresh. The caller fills it ([`HeightmapArea`]) and the batches read it.
+    pub fn polytone_heightmap_due(
+        &mut self,
+        camera: DVec3,
+        size: u32,
+        min_y: i32,
+    ) -> Option<HeightmapArea> {
+        if !self.polytone_gpu.iter().any(|s| s.shader().is_some()) {
+            return None;
+        }
+        let now = self.polytone_ticks;
+        let origin = [
+            camera.x.floor() as i32 - size as i32 / 2,
+            camera.z.floor() as i32 - size as i32 / 2,
+        ];
+        if let Some((area, at)) = self.polytone_heightmap
+            && now < at + 10
+            && area.min_y == min_y
+        {
+            return None;
+        }
+        let area = HeightmapArea {
+            origin,
+            size,
+            min_y,
+        };
+        self.polytone_heightmap = Some((area, now));
+        Some(area)
+    }
+
+    /// The GPU particle types drawn by their own shaders (wiki "GPU Particles"): each one's live
+    /// records with this frame's block and uniforms, for `Renderer::polytone_shader_batches`.
+    pub fn polytone_shader_batches(
+        &self,
+        camera: DVec3,
+        partial: f32,
+        light_at: &dyn Fn([i32; 3]) -> u8,
+    ) -> Vec<ShaderBatch> {
+        let Some(registry) = &self.polytone else {
+            return Vec::new();
+        };
+        let heightmap = self.polytone_heightmap.map(|(area, _)| area);
+        let mut light_cache = ParticleLightCache::default();
+        self.polytone_gpu
+            .iter()
+            .filter_map(|store| {
+                let uniforms = registry.gpu_uniforms(store.shader()?, camera.to_array());
+                store.shader_batch(
+                    camera,
+                    self.polytone_ticks,
+                    partial,
+                    &mut light_cache,
+                    light_at,
+                    heightmap,
+                    uniforms,
+                )
+            })
+            .filter(|batch| !batch.vertices.is_empty())
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +703,29 @@ mod tests {
             area: None,
             kill_below_heightmap: false,
         }
+    }
+
+    /// Wiki "GPU Particles": only the non-translucent types are alpha cutout. A translucent
+    /// type's faint records (a storm's rain at alpha 0.05) must not fall under the cutoff a
+    /// custom shader discards below.
+    #[test]
+    fn only_cutout_types_have_an_alpha_cutoff() {
+        let cutoff = |render_type| {
+            let block = gpu_block(
+                &gpu(0.0, 1.0),
+                render_type,
+                0,
+                false,
+                [0.0; 3],
+                0.0,
+                DVec3::ZERO,
+                None,
+            );
+            bytemuck::cast_slice::<u8, f32>(&block)[10]
+        };
+        assert_eq!(cutoff(RenderType::Translucent), 0.0);
+        assert_eq!(cutoff(RenderType::AdditiveTranslucent), 0.0);
+        assert_eq!(cutoff(RenderType::Opaque), 0.1);
     }
 
     #[test]
