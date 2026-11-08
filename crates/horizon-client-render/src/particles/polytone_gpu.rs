@@ -519,8 +519,8 @@ impl Store {
         self.shader.as_ref()
     }
 
-    /// The live records for the type's own shader at `now + partial` ticks: each quad of an
-    /// `area` its own record, spread over the box. `None` for a type without one.
+    /// The live records for the type's own shader at `now + partial` ticks, each repeated for
+    /// the copies of its `area` on its own place. `None` for a type without one.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn shader_batch(
         &self,
@@ -541,32 +541,30 @@ impl Store {
         let anchor = camera.floor();
         let base = now & !0xFFFF;
         let time = (now - base) as f32 + partial;
-        let (count, area) = self.gpu.area.map_or((1, [0.0; 3]), |(size, n)| (n, size));
+        let count = self.gpu.area.map_or(1, |(_, n)| n);
         let mut vertices = Vec::with_capacity(self.records.len() * count as usize * 4);
         for r in &self.records {
             let spawn = r.spawn as f32 - base as f32;
             if time - spawn >= r.lifetime {
                 continue;
             }
-            for quad in 0..u64::from(count) {
-                let offset: [f64; 3] = if count > 1 {
-                    std::array::from_fn(|i| (unit(r.seed, quad * 8 + i as u64 + 1) - 0.5) * area[i])
-                } else {
-                    [0.0; 3]
-                };
-                let world = DVec3::from_array(r.position) + DVec3::from_array(offset);
-                let packed = light_cache.get(ParticleLevel::block_at(world.to_array()), light_at);
-                let block_light = i32::from((packed & 15).max(self.def.light_level));
-                let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-                let vertex = ShaderVertex {
-                    position: (world - anchor).as_vec3().to_array(),
-                    velocity: r.velocity.map(|v| v as f32),
-                    spawn_life: [spawn, r.lifetime],
-                    params: [r.size, r.roll, r.custom, unit(r.seed, quad * 8 + 6) as f32],
-                    color: r.rgba.map(c),
-                    uv2: [block_light * 16, i32::from(packed >> 4) * 16],
-                    pad: 0,
-                };
+            // An `area`'s copies stack on the record (measured on the real mod: nine copies of
+            // an 8-block area draw on one spot, three additive ones three times as bright);
+            // spreading them is the shader's to do, as the default shader does.
+            let world = DVec3::from_array(r.position);
+            let packed = light_cache.get(ParticleLevel::block_at(world.to_array()), light_at);
+            let block_light = i32::from((packed & 15).max(self.def.light_level));
+            let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let vertex = ShaderVertex {
+                position: (world - anchor).as_vec3().to_array(),
+                velocity: r.velocity.map(|v| v as f32),
+                spawn_life: [spawn, r.lifetime],
+                params: [r.size, r.roll, r.custom, unit(r.seed, 6) as f32],
+                color: r.rgba.map(c),
+                uv2: [block_light * 16, i32::from(packed >> 4) * 16],
+                pad: 0,
+            };
+            for _ in 0..count {
                 vertices.extend([vertex; 4]);
             }
         }
