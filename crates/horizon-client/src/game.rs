@@ -2024,6 +2024,8 @@ pub struct PackResources {
     polytone_post: Option<Arc<horizon_client::polytone_post::PolytonePost>>,
     /// The packs' Polytone custom colours (`polytone/colors.json`).
     polytone_colors: Arc<horizon_client::polytone_colors::PackColors>,
+    /// The packs' Polytone expression uniforms on core shaders (`shader_modifiers`).
+    shader_modifiers: Option<Arc<horizon_client::polytone_post::ShaderModifiers>>,
 }
 /// A quick craft drag as the screen draws it: each dragged slot's count and
 /// whether the slot caps it (None: hidden), and what stays in hand.
@@ -10391,6 +10393,7 @@ impl Game<'_> {
         if self.pack.environments.is_some()
             || self.pack.polytone_particles.is_some()
             || self.pack.polytone_post.is_some()
+            || self.pack.shader_modifiers.is_some()
         {
             let light = self.world.light(block[0], block[1], block[2]);
             let frame = horizon_client::environment::Frame {
@@ -10692,6 +10695,17 @@ impl Game<'_> {
                 Some(extras)
             }
             _ => None,
+        };
+        // The packs' expression uniforms on the lightmap shader, beside the chains' blocks.
+        let polytone_extras = match (&self.pack.shader_modifiers, &polytone_frame) {
+            (Some(modifiers), Some(frame)) => {
+                let mut extras = polytone_extras.unwrap_or_default();
+                extras
+                    .blocks
+                    .extend(modifiers.blocks(&horizon_client::gfx::core_lightmap::STAGES, frame));
+                Some(extras)
+            }
+            _ => polytone_extras,
         };
         self.view_frustum = self
             .renderer
