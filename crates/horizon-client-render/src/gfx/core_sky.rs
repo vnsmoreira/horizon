@@ -41,6 +41,8 @@ struct Part {
     pipeline: wgpu::RenderPipeline,
     group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
+    /// The packs' expression uniforms the shader reads (`shader_modifiers`).
+    extra: super::expression_blocks::ExpressionBlocks,
     vertices: wgpu::Buffer,
     count: u32,
 }
@@ -78,13 +80,16 @@ impl Part {
                 count: None,
             })
             .collect();
+        let extra = super::expression_blocks::ExpressionBlocks::new(program, &[], 1024);
+        let entries: Vec<wgpu::BindGroupLayoutEntry> =
+            entries.into_iter().chain(extra.layout()).collect();
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some(name),
             entries: &entries,
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(name),
-            size: 1024,
+            size: extra.size().max(1024),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -97,6 +102,10 @@ impl Part {
                     size: wgpu::BufferSize::new(BLOCK_SIZES[i]),
                 }),
             })
+            .collect();
+        let resources: Vec<wgpu::BindGroupEntry> = resources
+            .into_iter()
+            .chain(extra.entries(&uniform))
             .collect();
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(name),
@@ -158,6 +167,7 @@ impl Part {
             pipeline,
             group,
             uniform,
+            extra,
             vertices,
             count: triangles.len() as u32,
         })
@@ -175,6 +185,19 @@ impl Part {
 pub(super) struct CoreSky {
     disc: Option<Part>,
     stars: Option<Part>,
+}
+
+/// The packs' sky and stars on the renderer.
+impl super::Renderer {
+    /// The resource packs' `core/sky` and `core/stars` (`CoreShaders::sky`,
+    /// `stars`), or the built-in sky and stars.
+    pub fn set_sky_shaders(
+        &mut self,
+        disc: Option<&crate::core_shader::CoreProgram>,
+        stars: Option<&crate::core_shader::CoreProgram>,
+    ) {
+        self.core_sky = CoreSky::new(&self.device, self.output.frame.format, disc, stars);
+    }
 }
 
 impl CoreSky {
@@ -224,12 +247,18 @@ impl CoreSky {
         encoder: &mut wgpu::CommandEncoder,
         sky: &[u8],
         stars: Option<&[u8]>,
+        blocks: Option<&std::collections::BTreeMap<String, Vec<u8>>>,
     ) {
+        let with_blocks = |part: &Part, data: &[u8]| {
+            let mut data = data.to_vec();
+            part.extra.write(&mut data, blocks);
+            data
+        };
         if let Some(disc) = &self.disc {
-            uploads.buffer(encoder, &disc.uniform, 0, sky);
+            uploads.buffer(encoder, &disc.uniform, 0, &with_blocks(disc, sky));
         }
         if let (Some(part), Some(data)) = (&self.stars, stars) {
-            uploads.buffer(encoder, &part.uniform, 0, data);
+            uploads.buffer(encoder, &part.uniform, 0, &with_blocks(part, data));
         }
     }
 
