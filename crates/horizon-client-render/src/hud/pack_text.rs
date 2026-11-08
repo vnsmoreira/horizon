@@ -45,13 +45,26 @@ pub(super) fn load_core(
     defines: &[&str],
     glue: &Glue,
 ) -> Option<Arc<CoreProgram>> {
+    load_pair(root, defaults, (name, name), defines, glue, &|_| false)
+}
+
+/// [`load_core`] for a pipeline whose stages have their own names (`core/screenquad` and
+/// `core/lightmap`) and that gives the blocks `provided` says yes to.
+pub(super) fn load_pair(
+    root: &Path,
+    defaults: &Path,
+    (vertex_name, name): (&str, &str),
+    defines: &[&str],
+    glue: &Glue,
+    provided: &dyn Fn(&str) -> bool,
+) -> Option<Arc<CoreProgram>> {
     if root == defaults {
         return None;
     }
     let read = |base: &Path, path: &str| std::fs::read_to_string(base.join(path)).ok();
     let own =
         |path: &str| read(root, path).filter(|text| read(defaults, path).as_ref() != Some(text));
-    let vertex_path = format!("assets/minecraft/shaders/core/{name}.vsh");
+    let vertex_path = format!("assets/minecraft/shaders/core/{vertex_name}.vsh");
     let fragment_path = format!("assets/minecraft/shaders/core/{name}.fsh");
     let (own_vertex, own_fragment) = (own(&vertex_path), own(&fragment_path));
     if own_vertex.is_none() && own_fragment.is_none() {
@@ -64,7 +77,9 @@ pub(super) fn load_core(
         let path = format!("assets/{namespace}/{path}");
         read(root, &path).or_else(|| read(defaults, &path))
     };
-    match crate::core_shader::translate_core(&vertex, &fragment, defines, &include, glue) {
+    match crate::core_shader::translate_core_with(
+        &vertex, &fragment, defines, &include, glue, provided,
+    ) {
         Ok(program) => {
             log::info!("the resource pack's {name} shader is used");
             Some(Arc::new(program))
@@ -76,10 +91,25 @@ pub(super) fn load_core(
     }
 }
 
-/// The packs' core shaders the atlas carries (text, block outline, sky, stars).
+/// The resource packs' core shaders the atlas carries, each `None` while no pack replaces it.
+#[derive(Clone, Default)]
+pub struct CoreShaders {
+    /// `core/text`, the GUI's text.
+    pub text: Option<Arc<CoreProgram>>,
+    /// `core/rendertype_lines`, the block outline.
+    pub lines: Option<Arc<CoreProgram>>,
+    /// `core/sky` and `core/stars`.
+    pub sky: Option<Arc<CoreProgram>>,
+    pub stars: Option<Arc<CoreProgram>>,
+    /// `core/lightmap` (with `core/screenquad`), when a pack replaces either.
+    pub lightmap: Option<Arc<CoreProgram>>,
+}
+
+/// The packs' core shaders the atlas carries ([`CoreShaders`]).
 pub(super) fn load_shaders(atlas: &mut super::HudAtlas, root: &Path, defaults: &Path) {
-    atlas.text_shader = load(root, defaults);
-    atlas.lines_shader = load_core(
+    let core = &mut atlas.core;
+    core.text = load(root, defaults);
+    core.lines = load_core(
         root,
         defaults,
         "rendertype_lines",
@@ -87,8 +117,16 @@ pub(super) fn load_shaders(atlas: &mut super::HudAtlas, root: &Path, defaults: &
         &crate::gfx::core_lines::GLUE,
     );
     let sky = |name| load_core(root, defaults, name, &[], &crate::gfx::core_sky::GLUE);
-    atlas.sky_shader = sky("sky");
-    atlas.stars_shader = sky("stars");
+    core.sky = sky("sky");
+    core.stars = sky("stars");
+    core.lightmap = load_pair(
+        root,
+        defaults,
+        ("screenquad", "lightmap"),
+        &[],
+        &crate::gfx::core_lightmap::GLUE,
+        &|block| block == crate::gfx::core_lightmap::INFO_BLOCK,
+    );
 }
 
 /// Each uniform block's offset in the one buffer (`core_shader::BLOCKS` order).
