@@ -109,6 +109,8 @@ pub struct HudAtlas {
     pub stars_shader: Option<std::sync::Arc<horizon_shaders::CoreProgram>>,
     /// The packs' Polytone screen sprite modifiers.
     pub sprite_modifiers: std::sync::Arc<sprite_modifiers::SpriteModifiers>,
+    /// The packs' `core/lightmap` (with `core/screenquad`), when a pack replaces either.
+    pub lightmap_shader: Option<std::sync::Arc<horizon_shaders::CoreProgram>>,
     /// The packs' OptiFine random entity textures, whose variants this atlas packs.
     pub random_textures: horizon_optifine::random_textures::RandomTextures,
     /// Their emissive overlays (`_e`), packed here too.
@@ -982,6 +984,7 @@ impl HudAtlas {
             sky_shader: None,
             stars_shader: None,
             sprite_modifiers: Default::default(),
+            lightmap_shader: None,
             random_textures: Default::default(),
             emissive: Arc::default(),
             blinks: Default::default(),
@@ -1051,6 +1054,7 @@ impl HudAtlas {
             sky_shader: None,
             stars_shader: None,
             sprite_modifiers: Default::default(),
+            lightmap_shader: None,
             random_textures: Default::default(),
             emissive: Default::default(),
             blinks: Default::default(),
@@ -1613,6 +1617,7 @@ impl HudAtlas {
             sky_shader: None,
             stars_shader: None,
             sprite_modifiers: Default::default(),
+            lightmap_shader: None,
             random_textures,
             emissive,
             blinks,
