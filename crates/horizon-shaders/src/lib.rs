@@ -44,7 +44,8 @@ pub use config::{
     draw_buffers, shadow_color,
 };
 pub use core_shader::{
-    BLOCKS, CoreProgram, Glue, SAMPLERS, other_binding, translate_core, translate_core_with,
+    BLOCKS, CoreProgram, Glue, POLYTONE_GLOBALS_GLSL, SAMPLERS, other_binding, translate_core,
+    translate_core_with,
 };
 pub use custom::{Custom, Val};
 pub use discover::{Found, discover};
