@@ -186,6 +186,7 @@ pub mod compositor;
 pub mod core_lightmap;
 pub(crate) mod core_lines;
 mod core_particles;
+mod expression_blocks;
 pub use core_particles::HEIGHTMAP_SIZE as POLYTONE_HEIGHTMAP_SIZE;
 pub(crate) mod core_sky;
 mod cull;
@@ -5160,13 +5161,6 @@ impl Renderer {
     pub fn custom_sky_draws(&mut self) -> &mut Vec<crate::custom_sky::Draw> {
         &mut self.custom_sky_draws
     }
-    /// The resource packs' `core/rendertype_lines` (`CoreShaders::lines`) for the block
-    /// outline, or the built-in one.
-    pub fn set_lines_shader(&mut self, program: Option<&crate::core_shader::CoreProgram>) {
-        let format = self.output.frame.format;
-        self.core_lines =
-            program.and_then(|program| core_lines::CoreLines::new(&self.device, format, program));
-    }
     /// The Polytone GPU particle batches drawn by their own shaders the next frame
     /// (`ParticleEngine::polytone_shader_batches`): the game refills it each frame.
     pub fn polytone_shader_batches(
@@ -5178,15 +5172,6 @@ impl Renderer {
     /// ([`POLYTONE_HEIGHTMAP_SIZE`] columns a side, x along a row, above the world's bottom).
     pub fn set_polytone_heightmap(&self, heights: &[u16]) {
         self.core_particles.set_heightmap(&self.queue, heights);
-    }
-    /// The resource packs' `core/sky` and `core/stars` (`CoreShaders::sky`,
-    /// `stars`), or the built-in sky and stars.
-    pub fn set_sky_shaders(
-        &mut self,
-        disc: Option<&crate::core_shader::CoreProgram>,
-        stars: Option<&crate::core_shader::CoreProgram>,
-    ) {
-        self.core_sky = core_sky::CoreSky::new(&self.device, self.output.frame.format, disc, stars);
     }
     /// LevelRenderer.submitBlockOutline: the buffer holds `edges` per stroke, the black
     /// secondary stroke first when high contrast is on.
@@ -9049,6 +9034,7 @@ impl Renderer {
         };
         // The vanilla blocks the packs' core shaders read: `Globals`, and the fog with its ends.
         let core_globals = self.pack_globals(frame);
+        let pack_blocks = frame.post_effects.extras.map(|e| &e.blocks);
         let [sky_end, clouds_end, ..] = globals.fog_ends;
         let core_fog = [fog[0], fog[1], fog[2], fog[3], sky_end, clouds_end];
         let outline_edges = frame.outline.len().min(MAX_OUTLINE_EDGES as usize);
@@ -9093,6 +9079,7 @@ impl Renderer {
                     fog_color,
                     core_fog,
                 );
+                let data = core.with_blocks(data, pack_blocks);
                 self.uploads.buffer(&mut encoder, core.uniform(), 0, &data);
             }
         }
@@ -9120,7 +9107,13 @@ impl Renderer {
                     fog,
                 )
             });
-            core.prepare(&mut self.uploads, &mut encoder, &sky, stars.as_deref());
+            core.prepare(
+                &mut self.uploads,
+                &mut encoder,
+                &sky,
+                stars.as_deref(),
+                pack_blocks,
+            );
         }
         // Polytone GPU particles with their own shader: the vanilla blocks as the block outline's
         // (a particle's ModelViewMat is the camera's rotation, its positions camera relative).
