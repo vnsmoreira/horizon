@@ -5015,6 +5015,13 @@ impl ParticleEngine {
                 r.v0 + dv * p.uv[3],
             );
             let target: &mut Vec<Vertex> = if p.additive { &mut additive } else { &mut *out };
+            let overlay = if p.additive {
+                crate::gfx::ADDITIVE_PARTICLE_OVERLAY
+            } else if layer {
+                crate::gfx::TRANSLUCENT_PARTICLE_OVERLAY
+            } else {
+                0
+            };
             // A Polytone model particle: its model's faces, scaled by its size and turned as
             // its quad would be.
             if let Some(model) = &p.model {
@@ -5028,11 +5035,7 @@ impl ParticleEngine {
                             normal: [0; 4],
                             pos: (center + rotation * (*corner * size)).to_array(),
                             uv: [r.u0 + du * uv[0], r.v0 + dv * uv[1]],
-                            layer: if layer {
-                                crate::gfx::TRANSLUCENT_PARTICLE_OVERLAY
-                            } else {
-                                0
-                            } | u32::from(hdr_tier(p.ty)) << 16,
+                            layer: overlay | u32::from(hdr_tier(p.ty)) << 16,
                             color,
                             light,
                             glint_uv: [0.0, 0.0],
@@ -5053,11 +5056,7 @@ impl ParticleEngine {
                         normal: [0; 4],
                         pos: v.to_array(),
                         uv,
-                        layer: if layer {
-                            crate::gfx::TRANSLUCENT_PARTICLE_OVERLAY
-                        } else {
-                            0
-                        } | u32::from(hdr_tier(p.ty)) << 16,
+                        layer: overlay | u32::from(hdr_tier(p.ty)) << 16,
                         color,
                         light,
 
