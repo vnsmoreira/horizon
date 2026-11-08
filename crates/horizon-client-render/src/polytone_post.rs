@@ -196,9 +196,93 @@ impl PolytonePost {
     }
 }
 
+/// The packs' `polytone/shader_modifiers/<shader>.json` (wiki "Expression Uniforms on Any
+/// Shader"): expression uniforms on core shaders, each a one-float block of its name, bound
+/// wherever a pipeline with that shader (as vertex or fragment stage) draws.
+pub struct ShaderModifiers {
+    /// Each shader id (`minecraft:core/lightmap`) and its uniforms.
+    shaders: Vec<(String, Vec<(String, Program)>)>,
+    configs: horizon_polytone::pack::Configs,
+}
+
+impl ShaderModifiers {
+    /// The packs' shader modifiers at `root`; `None` without any.
+    pub fn read(root: &Path, configs: horizon_polytone::pack::Configs) -> Option<Self> {
+        let shaders: Vec<(String, Vec<(String, Program)>)> = files(root, "shader_modifiers")
+            .into_iter()
+            .map(|(id, json)| {
+                let uniforms = json
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(name, src)| Some((name.clone(), compile(&id, src)?)))
+                    .collect();
+                (id, uniforms)
+            })
+            .collect();
+        (!shaders.is_empty()).then_some(Self { shaders, configs })
+    }
+
+    /// The uniform names the pipeline of `stages` (its shaders' ids) is given.
+    pub fn names(&self, stages: &[&str]) -> Vec<String> {
+        self.uniforms(stages)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// Their blocks this frame, by name: each value's float, padded to 16 bytes.
+    pub fn blocks(&self, stages: &[&str], frame: &Frame) -> Vec<(String, Vec<u8>)> {
+        self.uniforms(stages)
+            .map(|(name, program)| {
+                let value = crate::environment::eval_frame(program, frame, &self.configs)
+                    .map_or(0.0, |v| v.num()) as f32;
+                let mut block = value.to_le_bytes().to_vec();
+                block.resize(16, 0);
+                (name.clone(), block)
+            })
+            .collect()
+    }
+
+    fn uniforms(&self, stages: &[&str]) -> impl Iterator<Item = &(String, Program)> {
+        self.shaders
+            .iter()
+            .filter(|(id, _)| stages.contains(&id.as_str()))
+            .flat_map(|(_, uniforms)| uniforms)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shader_modifiers_give_their_shaders_uniforms_from_expressions() {
+        let root =
+            std::env::temp_dir().join(format!("horizon-shader-modifiers-{}", std::process::id()));
+        let path = root.join("assets/minecraft/polytone/shader_modifiers/core/lightmap.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"InNether": "g.dimensionType == 'minecraft:the_nether' ? 1 : 0"}"#,
+        )
+        .unwrap();
+        let modifiers = ShaderModifiers::read(&root, Default::default()).unwrap();
+        let lightmap = ["minecraft:core/screenquad", "minecraft:core/lightmap"];
+        assert_eq!(modifiers.names(&lightmap), ["InNether"]);
+        assert!(modifiers.names(&["minecraft:core/sky"]).is_empty());
+        let value = |dimension: &str| {
+            let frame = Frame {
+                dimension: dimension.into(),
+                ..Frame::default()
+            };
+            let blocks = modifiers.blocks(&lightmap, &frame);
+            assert_eq!(blocks[0].1.len(), 16);
+            f32::from_le_bytes(blocks[0].1[..4].try_into().unwrap())
+        };
+        assert_eq!(value("minecraft:the_nether"), 1.0);
+        assert_eq!(value("minecraft:overworld"), 0.0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn poly_globals_follow_std140() {
