@@ -104,6 +104,8 @@ pub struct HudAtlas {
     /// The packs' `core/sky` and `core/stars`, when a pack replaces them.
     pub sky_shader: Option<std::sync::Arc<horizon_shaders::CoreProgram>>,
     pub stars_shader: Option<std::sync::Arc<horizon_shaders::CoreProgram>>,
+    /// The packs' `core/clouds`, when a pack replaces it.
+    pub clouds_shader: Option<std::sync::Arc<horizon_shaders::CoreProgram>>,
     /// The packs' `core/lightmap` (with `core/screenquad`), when a pack replaces either.
     pub lightmap_shader: Option<std::sync::Arc<horizon_shaders::CoreProgram>>,
     /// The packs' OptiFine random entity textures, whose variants this atlas packs.
@@ -929,6 +931,21 @@ impl HudAtlas {
         };
         atlas.sky_shader = sky("sky");
         atlas.stars_shader = sky("stars");
+        let clouds_uniforms = given(&["minecraft:core/clouds"]);
+        atlas.clouds_shader = pack_text::load_pair(
+            root,
+            defaults,
+            ("clouds", "clouds"),
+            &[],
+            &crate::gfx::core_clouds::GLUE,
+            &|block| {
+                matches!(
+                    block,
+                    crate::gfx::core_clouds::INFO_BLOCK | crate::gfx::core_clouds::FACES
+                ) || block == crate::gfx::expression_blocks::POLY_GLOBALS
+                    || clouds_uniforms.iter().any(|n| n == block)
+            },
+        );
         let lightmap_uniforms = given(&crate::gfx::core_lightmap::STAGES);
         atlas.lightmap_shader = pack_text::load_pair(
             root,
@@ -1025,6 +1042,7 @@ impl HudAtlas {
             sky_shader: None,
             stars_shader: None,
             lightmap_shader: None,
+            clouds_shader: None,
             random_textures: Default::default(),
             emissive: Arc::default(),
             blinks: Default::default(),
@@ -1093,6 +1111,7 @@ impl HudAtlas {
             sky_shader: None,
             stars_shader: None,
             lightmap_shader: None,
+            clouds_shader: None,
             random_textures: Default::default(),
             emissive: Default::default(),
             blinks: Default::default(),
@@ -1672,6 +1691,7 @@ impl HudAtlas {
             sky_shader: None,
             stars_shader: None,
             lightmap_shader: None,
+            clouds_shader: None,
             random_textures,
             emissive,
             blinks,
