@@ -96,6 +96,64 @@ fn rains_at(world: &World, biomes: &Biomes, x: i32, y: i32, z: i32) -> bool {
 }
 
 impl Game<'_> {
+    /// Polytone GPU particles with their own shader: their heightmap (`Sampler1`) every
+    /// half second and this frame's records go to the renderer.
+    pub(super) fn polytone_gpu_particles(&mut self, camera: glam::DVec3, alpha: f64) {
+        let world = &self.world;
+        if let Some(area) = self.particles.polytone_heightmap_due(
+            camera,
+            horizon_client::gfx::POLYTONE_HEIGHTMAP_SIZE,
+            world.bottom_y(),
+        ) {
+            let properties = &self.pack.assets.properties;
+            let size = area.size as i32;
+            let heights: Vec<u16> = (0..size * size)
+                .map(|i| {
+                    let (x, z) = (area.origin[0] + i % size, area.origin[1] + i / size);
+                    let top = motion_blocking_height(world, properties, x, z);
+                    (top - area.min_y).clamp(0, i32::from(u16::MAX)) as u16
+                })
+                .collect();
+            if let Some(renderer) = &self.renderer {
+                renderer.set_polytone_heightmap(&heights);
+            }
+        }
+        let batches = self
+            .particles
+            .polytone_shader_batches(camera, alpha as f32, &|b| world.light(b[0], b[1], b[2]));
+        if let Some(renderer) = self.renderer.as_mut() {
+            *renderer.polytone_shader_batches() = batches;
+        }
+    }
+
+    /// Polytone's globals (wiki "Extra Shader Uniforms") for a view, its lens (field of view in
+    /// degrees, aspect, far plane) and the sun's angle in degrees.
+    pub(super) fn poly_globals(
+        &self,
+        view: glam::Mat4,
+        [fov_degrees, aspect, depth_far]: [f32; 3],
+        sun_angle: f32,
+        delta_time: f32,
+        camera: glam::DVec3,
+    ) -> horizon_client::polytone_post::PolyGlobals {
+        horizon_client::polytone_post::PolyGlobals {
+            // 26.3's reverse-Z projection, as the world's (and its depth) is.
+            projection: glam::Mat4::perspective_rh(
+                fov_degrees.to_radians(),
+                aspect,
+                depth_far,
+                0.05,
+            ),
+            model_view: view,
+            sun_angle: sun_angle.to_radians() - std::f32::consts::FRAC_PI_2,
+            day_time: self.view_day_time().rem_euclid(24000) as f32,
+            delta_time,
+            player: self.player.as_ref().map_or(camera.to_array(), |p| {
+                [p.position.x, p.position.y, p.position.z]
+            }),
+        }
+    }
+
     pub(super) fn forward(&self) -> [f64; 3] {
         let (yaw, pitch) = (
             f64::from(self.yaw).to_radians(),
