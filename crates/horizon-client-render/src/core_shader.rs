@@ -52,6 +52,14 @@ pub struct Glue<'a> {
 pub struct CoreProgram {
     pub vertex: naga::Module,
     pub fragment: naga::Module,
+    /// The blocks and samplers that are none of vanilla's, in binding order: the `i`th is at
+    /// [`other_binding`]`(i)` (a sampler's object one after its texture).
+    pub other: Vec<String>,
+}
+
+/// The binding of the `index`th block or sampler of [`CoreProgram::other`].
+pub fn other_binding(index: usize) -> u32 {
+    OTHER_BINDINGS + 2 * index as u32
 }
 
 /// The shaders of one pipeline (`text.vsh`, `text.fsh`) with vanilla's `defines` for it.
@@ -63,18 +71,37 @@ pub fn translate_core(
     include: &dyn Fn(&str) -> Option<String>,
     glue: &Glue,
 ) -> Result<CoreProgram, String> {
+    translate_core_with(vertex, fragment, defines, include, glue, &|_| false)
+}
+
+/// [`translate_core`] for a pipeline that also gives the blocks and samplers `provided` says
+/// yes to, at their [`CoreProgram::other`] bindings; the others are still an error.
+pub fn translate_core_with(
+    vertex: &str,
+    fragment: &str,
+    defines: &[&str],
+    include: &dyn Fn(&str) -> Option<String>,
+    glue: &Glue,
+    provided: &dyn Fn(&str) -> bool,
+) -> Result<CoreProgram, String> {
     const CORE: &str = "minecraft:shaders/core/";
-    let vertex_text = strip_comments(&expand(vertex, CORE, include)?);
-    let fragment_text = strip_comments(&expand(fragment, CORE, include)?);
+    let vertex_text = glsl_fixups::fixups(&strip_comments(&expand(vertex, CORE, include)?));
+    let fragment_text = glsl_fixups::fixups(&strip_comments(&expand(fragment, CORE, include)?));
     let mut names = Names::default();
     let vertex_code = rewrite(&vertex_text, ShaderStage::Vertex, glue, &mut names)
         .map_err(|e| format!("vertex shader: {e}"))?;
     let fragment_code = rewrite(&fragment_text, ShaderStage::Fragment, glue, &mut names)
         .map_err(|e| format!("fragment shader: {e}"))?;
-    let vertex = compile(ShaderStage::Vertex, &vertex_code, defines)
+    let vertex = compile(ShaderStage::Vertex, &vertex_code, defines, &names, provided)
         .map_err(|e| format!("vertex shader: {e}"))?;
-    let fragment = compile(ShaderStage::Fragment, &fragment_code, defines)
-        .map_err(|e| format!("fragment shader: {e}"))?;
+    let fragment = compile(
+        ShaderStage::Fragment,
+        &fragment_code,
+        defines,
+        &names,
+        provided,
+    )
+    .map_err(|e| format!("fragment shader: {e}"))?;
     let given = locations(&vertex, false);
     if let Some(missing) = locations(&fragment, true)
         .into_iter()
@@ -84,7 +111,11 @@ pub fn translate_core(
             "the fragment shader reads location {missing}, which the vertex shader doesn't write"
         ));
     }
-    Ok(CoreProgram { vertex, fragment })
+    Ok(CoreProgram {
+        vertex,
+        fragment,
+        other: names.other,
+    })
 }
 
 /// The file with its includes inlined (`#include <ns:path>`, `#include "relative"` and the same
@@ -289,7 +320,9 @@ fn block_name(line: &str) -> Option<&str> {
     let rest = line[at + "uniform".len()..].trim();
     let name_end = rest.find(|c: char| !is_ident(c)).unwrap_or(rest.len());
     let (name, tail) = rest.split_at(name_end);
-    (!name.is_empty() && matches!(tail.trim(), "" | "{")).then_some(name)
+    // `{` alone, or the whole block on the line (`uniform Day { float daylight; };`).
+    (!name.is_empty() && (tail.trim().is_empty() || tail.trim_start().starts_with('{')))
+        .then_some(name)
 }
 
 /// What the two stages share: the vertex stage's outputs in location order, and the names of
@@ -317,7 +350,7 @@ impl Names {
                 self.other.len() - 1
             }
         };
-        OTHER_BINDINGS + 2 * index as u32
+        other_binding(index)
     }
 }
 
@@ -462,11 +495,10 @@ fn rewrite(
     if !vertex {
         return Ok(out);
     }
-    let mut code = replace_ident(
-        &rename_main(&out),
-        "gl_VertexID",
-        &format!("({})", glue.vertex_id),
-    );
+    // Vulkan GLSL's `gl_VertexIndex` is an `int` (`int corner = gl_VertexIndex & 3;`), naga's
+    // a `uint`: the pack's code reads it converted. The glue's own code is not rewritten.
+    let code = replace_ident(&rename_main(&out), "gl_VertexIndex", "int(gl_VertexIndex)");
+    let mut code = replace_ident(&code, "gl_VertexID", &format!("({})", glue.vertex_id));
     write!(
         code,
         "void main() {{\n{}\nhz_main();\n{}\n}}\n",
@@ -498,7 +530,13 @@ fn rename_main(text: &str) -> String {
 }
 
 /// Parses and validates one stage; errors name the line of the rewritten code.
-fn compile(stage: ShaderStage, code: &str, defines: &[&str]) -> Result<naga::Module, String> {
+fn compile(
+    stage: ShaderStage,
+    code: &str,
+    defines: &[&str],
+    names: &Names,
+    provided: &dyn Fn(&str) -> bool,
+) -> Result<naga::Module, String> {
     let mut options = Options::from(stage);
     for define in defines {
         options.defines.insert((*define).to_owned(), String::new());
@@ -529,16 +567,16 @@ fn compile(stage: ShaderStage, code: &str, defines: &[&str]) -> Result<naga::Mod
         })?;
     let entry = info.get_entry_point(0);
     for (handle, global) in module.global_variables.iter() {
-        let other = global
-            .binding
-            .as_ref()
-            .is_some_and(|b| b.binding >= OTHER_BINDINGS);
-        if other && !entry[handle].is_empty() {
-            let name = global.name.as_deref().unwrap_or("?");
-            let name = name
-                .strip_prefix("hz_tex_")
-                .or_else(|| name.strip_prefix("hz_smp_"))
-                .unwrap_or(name);
+        let Some(binding) = global.binding.as_ref().map(|b| b.binding) else {
+            continue;
+        };
+        if binding >= OTHER_BINDINGS && !entry[handle].is_empty() {
+            // The name it was declared with (a block's instance may have none).
+            let index = ((binding - OTHER_BINDINGS) / 2) as usize;
+            let name = names.other.get(index).map_or("?", String::as_str);
+            if provided(name) {
+                continue;
+            }
             return Err(format!("{name} is not a block or sampler of this pipeline"));
         }
     }
@@ -571,9 +609,36 @@ fn locations(module: &naga::Module, inputs: bool) -> Vec<u32> {
     out
 }
 
+mod glsl_fixups;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #9386: what vanilla's GL compiler takes and naga's front end doesn't, in one shader: a
+    /// helper taking the sampler it reads, an unsized constant array and `gl_VertexIndex`.
+    #[test]
+    fn sampler_parameters_unsized_arrays_and_gl_vertex_index_translate() {
+        let vsh = "#version 330\n#include <minecraft:projection.glsl>\n\
+            in vec3 Position;\nout vec2 uv;\n\
+            void main() {\n    uv = vec2(gl_VertexIndex & 1, gl_VertexIndex >> 1);\n\
+                gl_Position = ProjMat * vec4(Position, 1.0);\n}\n";
+        let fsh = "#version 330\nuniform sampler2D Sampler0;\nin vec2 uv;\nout vec4 fragColor;\n\
+            const float[] weights = float[](0.25, 0.5, 0.25);\n\
+            vec4 tap(sampler2D tex, vec2 at, float w) { return texture(tex, at) * w; }\n\
+            void main() {\n    vec4 sum = vec4(0.0);\n\
+                for (int i = 0; i < 3; i++) {\n        sum += tap(Sampler0, uv + vec2(float(i - 1) * 0.01, 0.0), weights[i]);\n    }\n\
+                fragColor = sum;\n}\n";
+        let glue = Glue {
+            inputs: &[("Position", "vec3")],
+            prelude: "layout(location = 0) in vec3 hz_position;",
+            setup: "Position = hz_position;",
+            finish: "",
+            vertex_id: "int(gl_VertexIndex)",
+        };
+        let program = translate_core(vsh, fsh, &[], &include, &glue).unwrap();
+        assert_eq!(program.fragment.entry_points.len(), 1);
+    }
 
     const INCLUDES: [(&str, &str); 4] = [
         (
@@ -684,6 +749,20 @@ mod tests {
         let fsh = "#version 330\nin vec4 vertexColor;out vec4 fragColor;\
             void main() { fragColor = vertexColor; }\n";
         translate_core(vsh, fsh, &[], &include, &GLUE).unwrap();
+    }
+
+    /// A block declared on one line, as packs write a one-float uniform, is bound like one
+    /// over several lines; a block the caller provides is accepted, one it doesn't is not.
+    #[test]
+    fn a_block_on_one_line_is_bound_and_provided_blocks_are_accepted() {
+        let vsh = "#version 330\nlayout(std140) uniform Day { float daylight; };\nout vec4 vertexColor;\n\
+            void main() { vertexColor = vec4(daylight); gl_Position = vec4(0.0); }\n";
+        let fsh = "#version 330\nin vec4 vertexColor;\nout vec4 fragColor;\nvoid main() { fragColor = vertexColor; }\n";
+        let program =
+            translate_core_with(vsh, fsh, &[], &include, &GLUE, &|name| name == "Day").unwrap();
+        assert_eq!(program.other, ["Day"]);
+        let error = translate_core(vsh, fsh, &[], &include, &GLUE).unwrap_err();
+        assert!(error.contains("Day is not a block or sampler"), "{error}");
     }
 
     #[test]
