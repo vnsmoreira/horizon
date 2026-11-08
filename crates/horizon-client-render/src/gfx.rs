@@ -183,7 +183,7 @@ pub(crate) mod animate;
 mod arena;
 pub mod capture;
 pub mod compositor;
-pub(crate) mod core_lightmap;
+pub mod core_lightmap;
 pub(crate) mod core_lines;
 mod core_particles;
 pub use core_particles::HEIGHTMAP_SIZE as POLYTONE_HEIGHTMAP_SIZE;

@@ -2030,6 +2030,8 @@ pub struct PackResources {
     polytone_post: Option<Arc<horizon_client::polytone_post::PolytonePost>>,
     /// The packs' Polytone custom colours (`polytone/colors.json`).
     polytone_colors: Arc<horizon_client::pack_palette::PackColors>,
+    /// The packs' Polytone expression uniforms on core shaders (`shader_modifiers`).
+    shader_modifiers: Option<Arc<horizon_client::polytone_post::ShaderModifiers>>,
 }
 /// A quick craft drag as the screen draws it: each dragged slot's count and
 /// whether the slot caps it (None: hidden), and what stays in hand.
@@ -9318,6 +9320,7 @@ impl Game<'_> {
         if self.pack.environments.is_some()
             || self.pack.polytone_particles.is_some()
             || self.pack.polytone_post.is_some()
+            || self.pack.shader_modifiers.is_some()
         {
             let light = self.world.light(block[0], block[1], block[2]);
             let frame = horizon_client::environment::Frame {
@@ -9589,21 +9592,20 @@ impl Game<'_> {
         let game_ticks = self.world.game_time as f64 + alpha;
         let delta_ticks = (game_ticks - self.polytone_post_ticks).clamp(0.0, 20.0) as f32;
         self.polytone_post_ticks = game_ticks;
-        let polytone_extras = match (&self.pack.polytone_post, &polytone_frame) {
-            (Some(post), Some(frame)) => {
-                let view = bob * spin * horizon_client::camera::view_matrix(yaw, pitch);
-                let lens = [
-                    fov_degrees,
-                    size[0] as f32 / size[1].max(1) as f32,
-                    depth_far,
-                ];
-                let globals = self.poly_globals(view, lens, sky.sun_angle, delta_ticks, camera);
-                let (effects, extras) = post.frame(frame, &globals);
-                requested_post_effects.extend(effects);
-                Some(extras)
-            }
-            _ => None,
-        };
+        let poly_globals = polytone_frame.is_some().then(|| {
+            let view = bob * spin * horizon_client::camera::view_matrix(yaw, pitch);
+            let lens = [
+                fov_degrees,
+                size[0] as f32 / size[1].max(1) as f32,
+                depth_far,
+            ];
+            self.poly_globals(view, lens, sky.sun_angle, delta_ticks, camera)
+        });
+        let polytone_extras = self.polytone_extras(
+            polytone_frame.as_ref(),
+            poly_globals.as_ref(),
+            &mut requested_post_effects,
+        );
         self.view_frustum = self
             .renderer
             .as_ref()
