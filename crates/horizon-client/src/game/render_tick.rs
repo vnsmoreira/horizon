@@ -171,12 +171,12 @@ impl Game<'_> {
             effects.extend(chain_effects);
             extras
         });
-        // The packs' expression uniforms on the lightmap shader, beside the chains' blocks.
+        // The packs' expression uniforms on core shaders, beside the chains' blocks.
         if let Some(modifiers) = &self.pack.shader_modifiers {
             extras
                 .get_or_insert_default()
                 .blocks
-                .extend(modifiers.blocks(&horizon_client::gfx::core_lightmap::STAGES, frame));
+                .extend(modifiers.all_blocks(frame));
         }
         extras
     }

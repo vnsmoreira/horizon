@@ -186,6 +186,7 @@ pub mod compositor;
 pub mod core_lightmap;
 pub(crate) mod core_lines;
 mod core_particles;
+mod expression_blocks;
 pub use core_particles::HEIGHTMAP_SIZE as POLYTONE_HEIGHTMAP_SIZE;
 pub(crate) mod core_sky;
 mod cull;
@@ -9679,6 +9680,7 @@ impl Renderer {
                     fog_color,
                     core_fog,
                 );
+                let data = core.with_blocks(data, frame.post_effects.extras.map(|e| &e.blocks));
                 self.uploads.buffer(&mut encoder, core.uniform(), 0, &data);
             }
         }
@@ -9706,7 +9708,13 @@ impl Renderer {
                     fog,
                 )
             });
-            core.prepare(&mut self.uploads, &mut encoder, &sky, stars.as_deref());
+            core.prepare(
+                &mut self.uploads,
+                &mut encoder,
+                &sky,
+                stars.as_deref(),
+                frame.post_effects.extras.map(|e| &e.blocks),
+            );
         }
         // Polytone GPU particles with their own shader: the vanilla blocks as the block outline's
         // (a particle's ModelViewMat is the camera's rotation, its positions camera relative).
