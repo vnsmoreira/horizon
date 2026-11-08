@@ -183,6 +183,7 @@ mod animate;
 mod arena;
 pub mod capture;
 pub mod compositor;
+pub(crate) mod core_clouds;
 pub mod core_lightmap;
 pub(crate) mod core_lines;
 mod core_particles;
@@ -1268,6 +1269,8 @@ pub struct Renderer {
     core_sky: Option<core_sky::CoreSky>,
     /// A resource pack's `core/lightmap`, which draws the light texture in place of the native one.
     core_lightmap: Option<core_lightmap::CoreLightmap>,
+    /// A resource pack's `core/clouds`, which draws the clouds in place of the native ones.
+    core_clouds: Option<core_clouds::CoreClouds>,
     /// Polytone GPU particle types with their own shader, and this frame's batches of them.
     core_particles: core_particles::CoreParticles,
     polytone_shader_batches: Vec<crate::particles::polytone_gpu::ShaderBatch>,
@@ -5194,6 +5197,7 @@ impl Renderer {
             core_lines: None,
             core_sky: None,
             core_lightmap: None,
+            core_clouds: None,
             core_particles,
             polytone_shader_batches: Vec::new(),
             debug_lines_opaque,
@@ -5559,6 +5563,11 @@ impl Renderer {
         stars: Option<&horizon_shaders::CoreProgram>,
     ) {
         self.core_sky = core_sky::CoreSky::new(&self.device, self.output.frame.format, disc, stars);
+    }
+    /// The resource packs' `core/clouds` (`HudAtlas::clouds_shader`), or the native clouds.
+    pub fn set_clouds_shader(&mut self, program: Option<&horizon_shaders::CoreProgram>) {
+        self.core_clouds =
+            program.and_then(|p| core_clouds::CoreClouds::new(&self.device, self.output.frame.format, p));
     }
     /// The resource packs' `core/lightmap` (`HudAtlas::lightmap_shader`), or the native one.
     pub fn set_lightmap_shader(&mut self, program: Option<&horizon_shaders::CoreProgram>) {
@@ -9856,7 +9865,47 @@ impl Renderer {
             - native_cutout_quads
             - native_cutout_mipped_quads;
         let native_clouds = self.native.as_ref().is_none_or(|n| n.vanilla_clouds);
-        let cloud_quads = if let Some(input) = frame.clouds.as_ref().filter(|_| native_clouds) {
+        // A pack's core/clouds draws them instead, outside improved transparency's passes.
+        let pack_clouds = native_clouds
+            && !oit_on
+            && !frame.title
+            && self.core_clouds.is_some()
+            && frame.clouds.is_some();
+        if pack_clouds
+            && let (Some(core), Some(input)) = (self.core_clouds.as_mut(), frame.clouds.as_ref())
+        {
+            let (faces, info) = crate::clouds::pack_faces(input);
+            let size = [self.config.width, self.config.height];
+            let block = crate::post_chain::Globals {
+                glint_alpha: frame.glint_alpha,
+                ..frame.post_effects.globals
+            }
+            .bytes(size, frame.post_effects.menu_blur_radius as i32);
+            let [sky_end, clouds_end, ..] = globals.fog_ends;
+            let vanilla = core_lines::uniforms(
+                block,
+                views.primary(),
+                pose,
+                jitter,
+                1.0,
+                fog_color,
+                [fog[0], fog[1], fog[2], fog[3], sky_end, clouds_end],
+            );
+            core.prepare(
+                &self.device,
+                &mut self.uploads,
+                &mut encoder,
+                vanilla,
+                info,
+                &faces,
+                frame.post_effects.extras.map(|e| &e.blocks),
+            );
+        }
+        let cloud_quads = if let Some(input) = frame
+            .clouds
+            .as_ref()
+            .filter(|_| native_clouds && !pack_clouds)
+        {
             let (rebuilt, uniform) =
                 crate::spans::time("clouds", || self.cloud_mesh.prepare(input));
             let vertices = self.cloud_mesh.vertices.len() as u64;
@@ -11810,6 +11859,14 @@ impl Renderer {
                     ((entity_quads + text_quads + crumbling_quads) * 4) as i32,
                     0..1,
                 );
+            }
+            if pack_clouds
+                && !pack_draws_clouds
+                && let (Some(core), Some(input)) = (&self.core_clouds, frame.clouds.as_ref())
+            {
+                pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+                core.draw(&mut pass, !input.fast, self.index_quads);
+                pass.set_bind_group(0, &self.group, &[]);
             }
             if cloud_quads > 0 && !pack_draws_clouds && !oit_on {
                 pass.set_pipeline(&self.cloud_pipeline);

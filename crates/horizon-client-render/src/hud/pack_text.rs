@@ -146,6 +146,21 @@ pub(super) fn load_shaders(atlas: &mut super::HudAtlas, root: &Path, defaults: &
                 || lightmap_uniforms.iter().any(|n| n == block)
         },
     );
+    let clouds_uniforms = given(&["minecraft:core/clouds"]);
+    atlas.clouds_shader = load_pair(
+        root,
+        defaults,
+        ("clouds", "clouds"),
+        &[],
+        &crate::gfx::core_clouds::GLUE,
+        &|block| {
+            matches!(
+                block,
+                crate::gfx::core_clouds::INFO_BLOCK | crate::gfx::core_clouds::FACES
+            ) || block == crate::gfx::expression_blocks::POLY_GLOBALS
+                || clouds_uniforms.iter().any(|n| n == block)
+        },
+    );
 }
 
 /// Each uniform block's offset in the one buffer (`core_shader::BLOCKS` order).
