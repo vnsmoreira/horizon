@@ -32,12 +32,23 @@ const HALF_PI: f32 = std::f64::consts::FRAC_PI_2 as f32;
 const PI: f32 = std::f64::consts::PI as f32;
 
 /// `EasingType`'s named easings and `Ease`'s functions, with Java's float and double steps.
+/// `Ease.inCirc`: `(float)(-Math.sqrt(1.0F - x * x)) + 1.0F`. Outside [-1, 1] the root is HotSpot's NaN (x86's
+/// negative default NaN), which `-` makes positive and `+ 1.0F` keeps. LLVM may fold `-r + 1.0` into `1.0 - r`,
+/// whose NaN keeps the root's sign, so the NaN is returned before the addition.
+fn in_circ(x: f32) -> f32 {
+    let negated = (-f64::from(1.0 - x * x).sqrt()) as f32;
+    if negated.is_nan() {
+        return f32::from_bits(0x7fc0_0000);
+    }
+    negated + 1.0
+}
+
 const EASINGS: [(&str, fn(f32) -> f32); 32] = [
     ("constant", |_| 0.0),
     ("linear", |x| x),
     ("in_back", |x| square(x) * (2.701_58 * x - 1.701_58)),
     ("in_bounce", |x| 1.0 - out_bounce(1.0 - x)),
-    ("in_circ", |x| (-f64::from(1.0 - x * x).sqrt()) as f32 + 1.0),
+    ("in_circ", in_circ),
     ("in_cubic", cube),
     ("in_elastic", |x| {
         if x == 0.0 {
