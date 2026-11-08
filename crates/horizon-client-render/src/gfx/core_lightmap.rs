@@ -114,14 +114,8 @@ pub(super) struct CoreLightmap {
     pipeline: wgpu::RenderPipeline,
     group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
-    /// The packs' expression uniforms the shader reads (`shader_modifiers`), in their blocks'
-    /// order after `LightmapInfo`'s.
-    extra: Vec<String>,
-}
-
-/// The offset of the `i`th expression uniform's block.
-fn extra_offset(i: usize) -> u64 {
-    INFO_OFFSET + 256 * (i as u64 + 1)
+    /// The packs' expression uniforms the shader reads (`shader_modifiers`).
+    extra: super::expression_blocks::ExpressionBlocks,
 }
 
 impl CoreLightmap {
@@ -134,13 +128,11 @@ impl CoreLightmap {
             .position(|n| n == INFO_BLOCK)
             .map(crate::core_shader::other_binding);
         // The others are the expression uniforms the loader let through.
-        let extra: Vec<(u32, String)> = program
-            .other
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| *n != INFO_BLOCK)
-            .map(|(i, n)| (crate::core_shader::other_binding(i), n.clone()))
-            .collect();
+        let extra = super::expression_blocks::ExpressionBlocks::new(
+            program,
+            &[INFO_BLOCK],
+            INFO_OFFSET + 256,
+        );
         // A pack's shader is untrusted: the backend failing to compile it is an internal error.
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
@@ -166,14 +158,14 @@ impl CoreLightmap {
             .map(|binding| block(binding, BLOCK_SIZES[binding as usize]))
             .collect();
         entries.extend(info_binding.map(|b| block(b, INFO_SIZE)));
-        entries.extend(extra.iter().map(|(b, _)| block(*b, 16)));
+        entries.extend(extra.layout());
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Resource pack lightmap"),
             entries: &entries,
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Resource pack lightmap"),
-            size: extra_offset(extra.len()),
+            size: extra.size(),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -189,12 +181,7 @@ impl CoreLightmap {
             .map(|i| range(i as u32, BLOCK_OFFSETS[i], BLOCK_SIZES[i]))
             .collect();
         resources.extend(info_binding.map(|b| range(b, INFO_OFFSET, INFO_SIZE)));
-        resources.extend(
-            extra
-                .iter()
-                .enumerate()
-                .map(|(i, (b, _))| range(*b, extra_offset(i), 16)),
-        );
+        resources.extend(extra.entries(&uniform));
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Resource pack lightmap"),
             layout: &layout,
@@ -239,7 +226,7 @@ impl CoreLightmap {
             pipeline,
             group,
             uniform,
-            extra: extra.into_iter().map(|(_, n)| n).collect(),
+            extra,
         })
     }
 
@@ -251,17 +238,10 @@ impl CoreLightmap {
         info: &LightmapInfo,
         blocks: Option<&std::collections::BTreeMap<String, Vec<u8>>>,
     ) -> (&wgpu::Buffer, Vec<u8>) {
-        let mut data = vec![0u8; extra_offset(self.extra.len()) as usize];
+        let mut data = vec![0u8; (INFO_OFFSET + INFO_SIZE) as usize];
         data[..48].copy_from_slice(&globals);
-        let info_at = INFO_OFFSET as usize;
-        data[info_at..info_at + INFO_SIZE as usize].copy_from_slice(&info.std140());
-        for (i, name) in self.extra.iter().enumerate() {
-            if let Some(bytes) = blocks.and_then(|b| b.get(name)) {
-                let at = extra_offset(i) as usize;
-                let n = bytes.len().min(16);
-                data[at..at + n].copy_from_slice(&bytes[..n]);
-            }
-        }
+        data[INFO_OFFSET as usize..].copy_from_slice(&info.std140());
+        self.extra.write(&mut data, blocks);
         (&self.uniform, data)
     }
 
