@@ -186,7 +186,7 @@ pub mod compositor;
 pub mod core_lightmap;
 pub(crate) mod core_lines;
 mod core_particles;
-mod expression_blocks;
+pub(crate) mod expression_blocks;
 pub use core_particles::HEIGHTMAP_SIZE as POLYTONE_HEIGHTMAP_SIZE;
 pub(crate) mod core_sky;
 mod cull;
