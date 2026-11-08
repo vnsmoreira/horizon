@@ -1831,7 +1831,7 @@ mod tests {
     }
 
     /// Measured in Java: a custom particle's `movement_aligned` quad has its texture's top
-    /// against its motion, so the freepack's light rays, rising toward the noon sun, hang
+    /// against its motion, so a test pack's light rays, rising toward the noon sun, hang
     /// below the leaves they start at instead of over them.
     #[test]
     fn a_rising_movement_aligned_particle_hangs_its_texture_below() {
@@ -2176,7 +2176,7 @@ mod tests {
         );
     }
 
-    /// The freepack's light rays come from an emitter with physics that rests beside a leaf and
+    /// a test pack's light rays come from an emitter with physics that rests beside a leaf and
     /// emits every tick of its life: resting is not being still, only a stopped fall is.
     #[test]
     fn a_resting_particle_with_physics_lives_out_its_life() {

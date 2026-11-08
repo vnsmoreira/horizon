@@ -318,7 +318,7 @@ fn only_a_colormap_that_ignores_the_height_is_shared_up_a_column() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// Times a section's colormap tints with the freepack's kind of grass colormap (a biome id
+/// Times a section's colormap tints with a test pack's kind of grass colormap (a biome id
 /// column and a noise row) over the default Biome Blend: `cargo test --release ... -- --ignored
 /// --nocapture colormap_tint_cost`.
 #[test]
