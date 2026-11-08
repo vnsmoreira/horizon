@@ -45,13 +45,26 @@ pub(super) fn load_core(
     defines: &[&str],
     glue: &Glue,
 ) -> Option<Arc<CoreProgram>> {
+    load_pair(root, defaults, (name, name), defines, glue, &|_| false)
+}
+
+/// [`load_core`] for a pipeline whose stages have their own names (`core/screenquad` and
+/// `core/lightmap`) and that gives the blocks `provided` says yes to.
+pub(super) fn load_pair(
+    root: &Path,
+    defaults: &Path,
+    (vertex_name, name): (&str, &str),
+    defines: &[&str],
+    glue: &Glue,
+    provided: &dyn Fn(&str) -> bool,
+) -> Option<Arc<CoreProgram>> {
     if root == defaults {
         return None;
     }
     let read = |base: &Path, path: &str| std::fs::read_to_string(base.join(path)).ok();
     let own =
         |path: &str| read(root, path).filter(|text| read(defaults, path).as_ref() != Some(text));
-    let vertex_path = format!("assets/minecraft/shaders/core/{name}.vsh");
+    let vertex_path = format!("assets/minecraft/shaders/core/{vertex_name}.vsh");
     let fragment_path = format!("assets/minecraft/shaders/core/{name}.fsh");
     let (own_vertex, own_fragment) = (own(&vertex_path), own(&fragment_path));
     if own_vertex.is_none() && own_fragment.is_none() {
@@ -64,7 +77,9 @@ pub(super) fn load_core(
         let path = format!("assets/{namespace}/{path}");
         read(root, &path).or_else(|| read(defaults, &path))
     };
-    match horizon_shaders::translate_core(&vertex, &fragment, defines, &include, glue) {
+    match horizon_shaders::translate_core_with(
+        &vertex, &fragment, defines, &include, glue, provided,
+    ) {
         Ok(program) => {
             log::info!("the resource pack's {name} shader is used");
             Some(Arc::new(program))
