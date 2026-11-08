@@ -9592,6 +9592,8 @@ impl Game<'_> {
         let game_ticks = self.world.game_time as f64 + alpha;
         let delta_ticks = (game_ticks - self.polytone_post_ticks).clamp(0.0, 20.0) as f32;
         self.polytone_post_ticks = game_ticks;
+        // Polytone's globals (wiki "Extra Shader Uniforms"), which its post chains and the packs'
+        // core shaders read.
         let poly_globals = polytone_frame.is_some().then(|| {
             let view = bob * spin * horizon_client::camera::view_matrix(yaw, pitch);
             let lens = [

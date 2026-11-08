@@ -57,6 +57,39 @@ pub struct CoreProgram {
     pub other: Vec<String>,
 }
 
+/// `polytone_globals.glsl` (wiki "Extra Shader Uniforms"), for a pack that imports it without
+/// shipping it: the `PolyGlobals` block and its two helpers. 26.3's projection keeps depth from
+/// 0 to 1, so a depth read from the buffer is already the clip-space z.
+pub const POLYTONE_GLOBALS_GLSL: &str = "#ifndef POLYTONE_GLOBALS_GLSL
+#define POLYTONE_GLOBALS_GLSL
+layout(std140) uniform PolyGlobals {
+    mat4 PolyProjMat;
+    mat4 PolyModelViewMat;
+    float PolySunAngle;
+    float PolyDayTime;
+    float PolyDeltaTime;
+    ivec3 PolyPlayerBlockPos;
+    vec3 PolyPlayerOffset;
+};
+vec3 polyPlayerPos() {
+    return vec3(PolyPlayerBlockPos) - PolyPlayerOffset;
+}
+vec3 polyPositionFromDepth(vec2 uv, float depth) {
+    vec4 view = inverse(PolyProjMat) * vec4(uv * 2.0 - 1.0, depth, 1.0);
+    return (inverse(PolyModelViewMat) * vec4(view.xyz / view.w, 1.0)).xyz;
+}
+#endif
+";
+
+/// The include `id` resolves to, or the built-in `polytone_globals.glsl` where a pack imports it
+/// without shipping it.
+fn read_include(include: &dyn Fn(&str) -> Option<String>, id: &str) -> Option<String> {
+    include(id).or_else(|| {
+        id.ends_with("/polytone_globals.glsl")
+            .then(|| POLYTONE_GLOBALS_GLSL.to_owned())
+    })
+}
+
 /// The binding of the `index`th block or sampler of [`CoreProgram::other`].
 pub fn other_binding(index: usize) -> u32 {
     OTHER_BINDINGS + 2 * index as u32
@@ -146,7 +179,8 @@ fn expand(
             if let Some(target) = target {
                 let id = include_id(target, dir).ok_or_else(|| format!("bad include {target}"))?;
                 if seen.insert(id.clone()) {
-                    let file = include(&id).ok_or_else(|| format!("{id} not found"))?;
+                    let file =
+                        read_include(include, &id).ok_or_else(|| format!("{id} not found"))?;
                     let parent = &id[..id.rfind('/').map_or(id.len(), |i| i + 1)];
                     walk(&file, parent, include, seen, depth + 1, out)?;
                 }
@@ -614,6 +648,29 @@ mod glsl_fixups;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A core shader may import Polytone's globals without the pack shipping them: the built-in
+    /// `polytone_globals.glsl` declares the block, given by the pipeline, and its helpers.
+    #[test]
+    fn polytone_globals_import_without_the_pack_shipping_them() {
+        let vsh = "#version 330\n#include <minecraft:projection.glsl>\nin vec3 Position;\n\
+            void main() { gl_Position = ProjMat * vec4(Position, 1.0); }\n";
+        let fsh = "#version 330\n#moj_import <polytone_globals.glsl>\nout vec4 fragColor;\n\
+            void main() {\n    vec3 p = polyPlayerPos() + polyPositionFromDepth(vec2(0.5), 0.5);\n\
+                fragColor = vec4(fract(p), PolySunAngle + PolyDayTime + PolyDeltaTime);\n}\n";
+        let glue = Glue {
+            inputs: &[("Position", "vec3")],
+            prelude: "layout(location = 0) in vec3 hz_position;",
+            setup: "Position = hz_position;",
+            finish: "",
+            vertex_id: "int(gl_VertexIndex)",
+        };
+        let program =
+            translate_core_with(vsh, fsh, &[], &include, &glue, &|b| b == "PolyGlobals").unwrap();
+        assert_eq!(program.other, ["PolyGlobals"]);
+        // Without the pipeline giving it, the block is refused like any unknown one.
+        assert!(translate_core(vsh, fsh, &[], &include, &glue).is_err());
+    }
 
     /// #9386: what vanilla's GL compiler takes and naga's front end doesn't, in one shader: a
     /// helper taking the sampler it reads, an unsized constant array and `gl_VertexIndex`.
