@@ -11082,13 +11082,11 @@ impl Game<'_> {
             }
             _ => None,
         };
-        // The packs' expression uniforms on the lightmap shader, beside the chains' blocks.
+        // The packs' expression uniforms on core shaders, beside the chains' blocks.
         let polytone_extras = match (&self.pack.shader_modifiers, &polytone_frame) {
             (Some(modifiers), Some(frame)) => {
                 let mut extras = polytone_extras.unwrap_or_default();
-                extras
-                    .blocks
-                    .extend(modifiers.blocks(&horizon_client::gfx::core_lightmap::STAGES, frame));
+                extras.blocks.extend(modifiers.all_blocks(frame));
                 Some(extras)
             }
             _ => polytone_extras,
