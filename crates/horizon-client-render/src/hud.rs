@@ -104,6 +104,8 @@ pub struct HudAtlas {
     /// The packs' `core/sky` and `core/stars`, when a pack replaces them.
     pub sky_shader: Option<std::sync::Arc<horizon_shaders::CoreProgram>>,
     pub stars_shader: Option<std::sync::Arc<horizon_shaders::CoreProgram>>,
+    /// The packs' `core/lightmap` (with `core/screenquad`), when a pack replaces either.
+    pub lightmap_shader: Option<std::sync::Arc<horizon_shaders::CoreProgram>>,
     /// The packs' OptiFine random entity textures, whose variants this atlas packs.
     pub random_textures: horizon_optifine::random_textures::RandomTextures,
     /// Their emissive overlays (`_e`), packed here too.
@@ -899,6 +901,14 @@ impl HudAtlas {
             |name| pack_text::load_core(root, defaults, name, &[], &crate::gfx::core_sky::GLUE);
         atlas.sky_shader = sky("sky");
         atlas.stars_shader = sky("stars");
+        atlas.lightmap_shader = pack_text::load_pair(
+            root,
+            defaults,
+            ("screenquad", "lightmap"),
+            &[],
+            &crate::gfx::core_lightmap::GLUE,
+            &|block| block == crate::gfx::core_lightmap::INFO_BLOCK,
+        );
         Ok(atlas)
     }
     /// Empty slots written at run time: map textures (game/maps.rs), the
@@ -981,6 +991,7 @@ impl HudAtlas {
             lines_shader: None,
             sky_shader: None,
             stars_shader: None,
+            lightmap_shader: None,
             random_textures: Default::default(),
             emissive: Arc::default(),
             blinks: Default::default(),
@@ -1048,6 +1059,7 @@ impl HudAtlas {
             lines_shader: None,
             sky_shader: None,
             stars_shader: None,
+            lightmap_shader: None,
             random_textures: Default::default(),
             emissive: Default::default(),
             blinks: Default::default(),
@@ -1626,6 +1638,7 @@ impl HudAtlas {
             lines_shader: None,
             sky_shader: None,
             stars_shader: None,
+            lightmap_shader: None,
             random_textures,
             emissive,
             blinks,
