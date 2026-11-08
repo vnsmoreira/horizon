@@ -901,13 +901,23 @@ impl HudAtlas {
             |name| pack_text::load_core(root, defaults, name, &[], &crate::gfx::core_sky::GLUE);
         atlas.sky_shader = sky("sky");
         atlas.stars_shader = sky("stars");
+        // The packs' expression uniforms on it (`shader_modifiers`) are blocks it is given too.
+        let expression_uniforms = crate::polytone_post::ShaderModifiers::read(
+            root,
+            crate::packs::polytone_configs(&crate::packs::Source::Dir(root.to_path_buf())),
+        )
+        .map(|m| m.names(&crate::gfx::core_lightmap::STAGES))
+        .unwrap_or_default();
         atlas.lightmap_shader = pack_text::load_pair(
             root,
             defaults,
             ("screenquad", "lightmap"),
             &[],
             &crate::gfx::core_lightmap::GLUE,
-            &|block| block == crate::gfx::core_lightmap::INFO_BLOCK,
+            &|block| {
+                block == crate::gfx::core_lightmap::INFO_BLOCK
+                    || expression_uniforms.iter().any(|n| n == block)
+            },
         );
         Ok(atlas)
     }

@@ -183,7 +183,7 @@ mod animate;
 mod arena;
 pub mod capture;
 pub mod compositor;
-pub(crate) mod core_lightmap;
+pub mod core_lightmap;
 pub(crate) mod core_lines;
 mod core_particles;
 pub use core_particles::HEIGHTMAP_SIZE as POLYTONE_HEIGHTMAP_SIZE;
@@ -8115,6 +8115,7 @@ impl Renderer {
         flicker: f32,
         boss_darken: f32,
         globals: [u8; 48],
+        blocks: Option<&std::collections::BTreeMap<String, Vec<u8>>>,
     ) {
         // LightmapRenderStateExtractor.extract: what lightmap.fsh reads (NightVisionColor's
         // default is #999999).
@@ -8133,7 +8134,7 @@ impl Renderer {
         if let Some(core) = &self.core_lightmap
             && !self.fullbright
         {
-            let (buffer, data) = core.uniforms(globals, &info);
+            let (buffer, data) = core.uniforms(globals, &info, blocks);
             self.uploads.buffer(encoder, buffer, 0, &data);
             let view = self.lightmap.create_view(&Default::default());
             core.draw(encoder, &view);
@@ -8571,6 +8572,7 @@ impl Renderer {
                 [self.config.width, self.config.height],
                 frame.post_effects.menu_blur_radius as i32,
             ),
+            frame.post_effects.extras.map(|e| &e.blocks),
         );
         let views = self.views(frame);
         let pose = frame.bob * frame.spin;
