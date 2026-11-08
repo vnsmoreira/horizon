@@ -99,15 +99,8 @@ pub struct HudAtlas {
     pub glint: (Vec<u8>, u32, u32),
     /// `misc/enchanted_glint_armor`, the armour layers' `GlintSampler`.
     pub glint_armor: (Vec<u8>, u32, u32),
-    /// A resource pack's own `core/text` shader for the GUI's text, translated;
-    /// none draws the text natively.
-    pub text_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
-    /// A resource pack's own `core/rendertype_lines` shader for the block outline, translated;
-    /// none draws the outline natively.
-    pub lines_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
-    /// The packs' `core/sky` and `core/stars`, when a pack replaces them.
-    pub sky_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
-    pub stars_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
+    /// The resource packs' own core shaders, translated (none draws natively).
+    pub core: pack_text::CoreShaders,
     /// The packs' Polytone screen sprite modifiers.
     pub sprite_modifiers: std::sync::Arc<sprite_modifiers::SpriteModifiers>,
     /// The packs' OptiFine random entity textures, whose variants this atlas packs.
@@ -978,10 +971,7 @@ impl HudAtlas {
             font: crate::font::Font::metrics(root),
             glint: (Vec::new(), 1, 1),
             glint_armor: (Vec::new(), 1, 1),
-            text_shader: None,
-            lines_shader: None,
-            sky_shader: None,
-            stars_shader: None,
+            core: Default::default(),
             sprite_modifiers: Default::default(),
             random_textures: Default::default(),
             emissive: Arc::default(),
@@ -1047,10 +1037,7 @@ impl HudAtlas {
             glint: (vec![0; 4], 1, 1),
             glint_armor: (vec![0; 4], 1, 1),
             white,
-            text_shader: None,
-            lines_shader: None,
-            sky_shader: None,
-            stars_shader: None,
+            core: Default::default(),
             sprite_modifiers: Default::default(),
             random_textures: Default::default(),
             emissive: Default::default(),
@@ -1584,10 +1571,7 @@ impl HudAtlas {
             sprite_animations,
             glint,
             glint_armor,
-            text_shader: None,
-            lines_shader: None,
-            sky_shader: None,
-            stars_shader: None,
+            core: Default::default(),
             sprite_modifiers: Default::default(),
             random_textures,
             emissive,
