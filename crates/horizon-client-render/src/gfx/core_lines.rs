@@ -38,6 +38,20 @@ pub(super) struct CoreLines {
     uniform: wgpu::Buffer,
 }
 
+impl super::Renderer {
+    /// The vanilla `Globals` block a pack's core shaders read this frame.
+    pub(super) fn pack_globals(&self, frame: &super::Frame<'_>) -> [u8; 48] {
+        crate::post_chain::Globals {
+            glint_alpha: frame.glint_alpha,
+            ..frame.post_effects.globals
+        }
+        .bytes(
+            [self.config.width, self.config.height],
+            frame.post_effects.menu_blur_radius as i32,
+        )
+    }
+}
+
 impl CoreLines {
     pub(super) fn new(
         device: &wgpu::Device,
