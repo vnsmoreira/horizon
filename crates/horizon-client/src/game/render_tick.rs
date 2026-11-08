@@ -157,8 +157,8 @@ impl Game<'_> {
     }
 
     /// The packs' Polytone post chains' effects for this frame (into `effects`), and the blocks
-    /// they and the packs' core shaders read: the chains' own and the expression uniforms
-    /// (`shader_modifiers`). `None` without a frame of the packs' expressions.
+    /// they and the packs' core shaders read: the chains' own, the expression uniforms
+    /// (`shader_modifiers`) and the globals. `None` without a frame of the packs' expressions.
     pub(super) fn polytone_extras(
         &self,
         frame: Option<&horizon_client::environment::Frame>,
@@ -171,12 +171,12 @@ impl Game<'_> {
             effects.extend(chain_effects);
             extras
         });
-        // The packs' expression uniforms on core shaders, beside the chains' blocks.
+        // The packs' expression uniforms and the globals on core shaders, beside the chains'
+        // blocks.
         if let Some(modifiers) = &self.pack.shader_modifiers {
-            extras
-                .get_or_insert_default()
-                .blocks
-                .extend(modifiers.all_blocks(frame));
+            let blocks = &mut extras.get_or_insert_default().blocks;
+            blocks.extend(modifiers.all_blocks(frame));
+            blocks.insert("PolyGlobals".to_owned(), globals.bytes());
         }
         extras
     }
