@@ -183,6 +183,7 @@ mod animate;
 mod arena;
 pub mod capture;
 pub mod compositor;
+pub(crate) mod core_lightmap;
 pub(crate) mod core_lines;
 mod core_particles;
 pub use core_particles::HEIGHTMAP_SIZE as POLYTONE_HEIGHTMAP_SIZE;
@@ -1257,6 +1258,8 @@ pub struct Renderer {
     core_lines: Option<core_lines::CoreLines>,
     /// The packs' `core/sky` and `core/stars`, drawn in place of the native sky and stars.
     core_sky: Option<core_sky::CoreSky>,
+    /// A resource pack's `core/lightmap`, which draws the light texture in place of the native one.
+    core_lightmap: Option<core_lightmap::CoreLightmap>,
     /// Polytone GPU particle types with their own shader, and this frame's batches of them.
     core_particles: core_particles::CoreParticles,
     polytone_shader_batches: Vec<crate::particles::polytone_gpu::ShaderBatch>,
@@ -3698,7 +3701,10 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            // A pack's `core/lightmap` draws into it.
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
         let lightmap_view = lightmap.create_view(&Default::default());
@@ -5192,6 +5198,7 @@ impl Renderer {
             lines_secondary,
             core_lines: None,
             core_sky: None,
+            core_lightmap: None,
             core_particles,
             polytone_shader_batches: Vec::new(),
             debug_lines_opaque,
@@ -5559,6 +5566,12 @@ impl Renderer {
         stars: Option<&horizon_shaders::CoreProgram>,
     ) {
         self.core_sky = core_sky::CoreSky::new(&self.device, self.frame_format, disc, stars);
+    }
+    /// The resource packs' `core/lightmap` (`HudAtlas::lightmap_shader`), or the native one.
+    pub fn set_lightmap_shader(&mut self, program: Option<&horizon_shaders::CoreProgram>) {
+        self.core_lightmap =
+            program.and_then(|p| core_lightmap::CoreLightmap::new(&self.device, p));
+        self.lightmap_uploaded = false;
     }
     /// LevelRenderer.submitBlockOutline: the buffer holds `edges` per stroke, the black
     /// secondary stroke first when high contrast is on.
@@ -8020,6 +8033,7 @@ impl Renderer {
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
         View::screen(yaw, pitch, fov_degrees, aspect, far)
     }
+    #[allow(clippy::too_many_arguments)]
     fn update_lightmap(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -8029,44 +8043,42 @@ impl Renderer {
         night_vision: f32,
         flicker: f32,
         boss_darken: f32,
+        globals: [u8; 48],
     ) {
-        // lightmap.fsh: per (block, sky) level.
-        let brightness = |level: f32| level / (4.0 - 3.0 * level);
-        let mut pixels = [0u8; 16 * 16 * 4];
-        for s in 0..16 {
-            for b in 0..16 {
-                let block_level = b as f32 / 15.0;
-                let sky_level = s as f32 / 15.0;
-                let block_brightness = brightness(block_level) * (1.4 + flicker);
-                let sky_brightness = brightness(sky_level) * sky.sky_light_factor;
-                // NightVisionColor defaults to 0x999999.
-                let mut color =
-                    Vec3::from(sky.ambient_light_color).max(Vec3::splat(0.6 * night_vision));
-                color += Vec3::from(sky.sky_light_color) * sky_brightness;
-                let parabolic = (2.0 * block_level - 1.0).powi(2);
-                let block_color = Vec3::from(sky.block_light_tint).lerp(Vec3::ONE, 0.9 * parabolic);
-                color += block_color * block_brightness;
-                // lightmap.fsh: a boss bar mixes the light toward 70/60/60%.
-                color = color.lerp(color * Vec3::new(0.7, 0.6, 0.6), boss_darken);
-                color -= Vec3::splat(darkness);
-                color = color.clamp(Vec3::ZERO, Vec3::ONE);
-                let max = color.max_element().max(1e-6);
-                let inverted = 1.0 - max;
-                let scaled = 1.0 - inverted.powi(4);
-                let not_gamma = color * (scaled / max);
-                color = color.lerp(not_gamma, gamma);
-                let i = (s * 16 + b) * 4;
-                pixels[i] = (color.x * 255.0) as u8;
-                pixels[i + 1] = (color.y * 255.0) as u8;
-                pixels[i + 2] = (color.z * 255.0) as u8;
-                pixels[i + 3] = 255;
-            }
+        // LightmapRenderStateExtractor.extract: what lightmap.fsh reads (NightVisionColor's
+        // default is #999999).
+        let info = core_lightmap::LightmapInfo {
+            sky_factor: sky.sky_light_factor,
+            block_factor: 1.4 + flicker,
+            night_vision,
+            darkness,
+            boss_darkening: boss_darken,
+            brightness: gamma,
+            block_light_tint: sky.block_light_tint,
+            sky_light_color: sky.sky_light_color,
+            ambient_color: sky.ambient_light_color,
+            night_vision_color: [0.6; 3],
+        };
+        if let Some(core) = &self.core_lightmap
+            && !self.fullbright
+        {
+            let (buffer, data) = core.uniforms(globals, &info);
+            self.uploads.buffer(encoder, buffer, 0, &data);
+            let view = self.lightmap.create_view(&Default::default());
+            core.draw(encoder, &view);
+            // Native pixels go on being made for F3's view of the lightmap.
+            self.lightmap_uploaded = false;
         }
+        let mut pixels = core_lightmap::native_lightmap(&info);
         if self.fullbright {
             pixels.fill(255);
         }
         // The lightmap changes with the time of day, flicker and effects,
         // not every frame: upload only what differs from the texture.
+        if self.core_lightmap.is_some() && !self.fullbright {
+            self.lightmap_pixels = pixels;
+            return;
+        }
         if pixels == self.lightmap_pixels && self.lightmap_uploaded {
             return;
         }
@@ -8469,6 +8481,14 @@ impl Renderer {
             frame.night_vision,
             frame.block_flicker,
             frame.boss_darken,
+            crate::post_chain::Globals {
+                glint_alpha: frame.glint_alpha,
+                ..frame.post_effects.globals
+            }
+            .bytes(
+                [self.config.width, self.config.height],
+                frame.post_effects.menu_blur_radius as i32,
+            ),
         );
         let views = self.views(frame);
         let pose = frame.bob * frame.spin;
