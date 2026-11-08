@@ -29,7 +29,7 @@ pub use horizon_client_core::particle_type::ParticleType;
 pub use horizon_items::firework::{DYE_FIREWORK_COLORS, FireworkExplosion, FireworkShape};
 mod native;
 pub mod polytone;
-mod polytone_gpu;
+pub mod polytone_gpu;
 mod polytone_model;
 pub use native::{ParticleController, ParticleUpdate};
 
@@ -2185,18 +2185,20 @@ impl ParticleEngine {
             && let Some(def) = registry.get(name)
         {
             let (registry, def, name) = (registry.clone(), def.clone(), name.to_owned());
-            let particle = polytone::make(self, &registry, &name, &def, o, p, v, seed)?;
+            let (particle, custom) = polytone::make(self, &registry, &name, &def, o, p, v, seed)?;
             if def.gpu.is_some() {
                 // A GPU particle is only a record: it never becomes an engine particle.
                 let now = self.polytone_ticks;
                 let store = match self.polytone_gpu.iter().position(|s| s.is(&def)) {
                     Some(i) => &mut self.polytone_gpu[i],
                     None => {
-                        self.polytone_gpu.push(polytone_gpu::Store::new(&def)?);
+                        let shader = registry.gpu_shader(&name);
+                        self.polytone_gpu
+                            .push(polytone_gpu::Store::new(&def, shader)?);
                         self.polytone_gpu.last_mut()?
                     }
                 };
-                store.spawn(&particle, now, seed as u64);
+                store.spawn(&particle, custom, now, seed as u64);
                 return None;
             }
             return Some(particle);
@@ -5063,6 +5065,38 @@ impl ParticleEngine {
                 &mut additive,
             );
         }
+    }
+
+    /// The GPU particle types drawn by their own shaders (wiki "GPU Particles"): each one's live
+    /// records with this frame's block and uniforms, for `Renderer::set_polytone_shader_batches`.
+    /// `heightmap` is the area the game fills `Sampler1` with.
+    pub fn polytone_shader_batches(
+        &self,
+        camera: DVec3,
+        partial: f32,
+        light_at: &dyn Fn([i32; 3]) -> u8,
+        heightmap: Option<polytone_gpu::HeightmapArea>,
+    ) -> Vec<polytone_gpu::ShaderBatch> {
+        let Some(registry) = &self.polytone else {
+            return Vec::new();
+        };
+        let mut light_cache = ParticleLightCache::default();
+        self.polytone_gpu
+            .iter()
+            .filter_map(|store| {
+                let uniforms = registry.gpu_uniforms(store.shader()?, camera.to_array());
+                store.shader_batch(
+                    camera,
+                    self.polytone_ticks,
+                    partial,
+                    &mut light_cache,
+                    light_at,
+                    heightmap,
+                    uniforms,
+                )
+            })
+            .filter(|batch| !batch.vertices.is_empty())
+            .collect()
     }
 }
 /// How brightly particle `ty` shines in HDR output, as `mesher::hdr_tier`: flames,

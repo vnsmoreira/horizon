@@ -52,6 +52,14 @@ pub struct Glue<'a> {
 pub struct CoreProgram {
     pub vertex: naga::Module,
     pub fragment: naga::Module,
+    /// The blocks and samplers that are none of vanilla's, in binding order: the `i`th is at
+    /// [`other_binding`]`(i)` (a sampler's object one after its texture).
+    pub other: Vec<String>,
+}
+
+/// The binding of the `index`th block or sampler of [`CoreProgram::other`].
+pub fn other_binding(index: usize) -> u32 {
+    OTHER_BINDINGS + 2 * index as u32
 }
 
 /// The shaders of one pipeline (`text.vsh`, `text.fsh`) with vanilla's `defines` for it.
@@ -84,7 +92,11 @@ pub fn translate_core(
             "the fragment shader reads location {missing}, which the vertex shader doesn't write"
         ));
     }
-    Ok(CoreProgram { vertex, fragment })
+    Ok(CoreProgram {
+        vertex,
+        fragment,
+        other: names.other,
+    })
 }
 
 /// The file with its includes inlined (`#include <ns:path>`, `#include "relative"` and the same
@@ -317,7 +329,7 @@ impl Names {
                 self.other.len() - 1
             }
         };
-        OTHER_BINDINGS + 2 * index as u32
+        other_binding(index)
     }
 }
 

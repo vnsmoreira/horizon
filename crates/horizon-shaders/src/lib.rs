@@ -43,7 +43,7 @@ pub use config::{
     BUFFERS, Buffer, Config, Format, Kind, SHADOW_COLORS, Shadow, buffer_index, draw_buffers,
     shadow_color,
 };
-pub use core_shader::{BLOCKS, CoreProgram, Glue, SAMPLERS, translate_core};
+pub use core_shader::{BLOCKS, CoreProgram, Glue, SAMPLERS, other_binding, translate_core};
 pub use custom::{Custom, Val};
 pub use discover::{Found, discover};
 pub use lang::Lang;
