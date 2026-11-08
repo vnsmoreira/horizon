@@ -79,7 +79,10 @@ fn include(root: &Path, src: &str, depth: u32) -> Result<String, String> {
     let mut out = String::new();
     for line in src.lines() {
         let t = line.trim_start();
-        if let Some(rest) = t.strip_prefix("#include") {
+        if let Some(rest) = t
+            .strip_prefix("#include")
+            .or_else(|| t.strip_prefix("#moj_import"))
+        {
             let name = rest
                 .trim()
                 .trim_start_matches(['<', '"'])
@@ -92,8 +95,13 @@ fn include(root: &Path, src: &str, depth: u32) -> Result<String, String> {
                 .join("shaders")
                 .join("include")
                 .join(path);
-            let text = std::fs::read_to_string(&file)
-                .map_err(|e| format!("#include <{name}>: {}: {e}", file.display()))?;
+            // Polytone's own include, where the pack doesn't ship it.
+            let text = match std::fs::read_to_string(&file) {
+                Err(_) if path == "polytone_globals.glsl" => {
+                    crate::core_shader::POLYTONE_GLOBALS_GLSL.to_owned()
+                }
+                read => read.map_err(|e| format!("#include <{name}>: {}: {e}", file.display()))?,
+            };
             out.push_str(&include(root, &text, depth + 1)?);
         } else if t.starts_with("#version") || t.starts_with("#extension") {
             // Re-added below, for the translator.
@@ -300,6 +308,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A post shader imports Polytone's globals the way the wiki writes it, `#moj_import`, and gets
+    /// the built-in file where the pack doesn't ship one.
+    #[test]
+    fn polytone_globals_import_without_the_pack_shipping_them() {
+        let text = include(
+            Path::new("/nonexistent/horizon-pack"),
+            "#moj_import <polytone_globals.glsl>\nvoid main() {}\n",
+            0,
+        )
+        .unwrap();
+        assert!(text.contains("uniform PolyGlobals"));
+        assert!(text.contains("vec3 polyPlayerPos()"));
+        // Any other missing include is still an error.
+        assert!(
+            include(
+                Path::new("/nonexistent/horizon-pack"),
+                "#include <nope.glsl>\n",
+                0
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -1,9 +1,13 @@
-//! A pack core shader's expression uniforms (Polytone `shader_modifiers`, wiki "Expression
-//! Uniforms on Any Shader"): one-float blocks beyond the pipeline's own, at their
-//! [`CoreProgram::other`] bindings, written each frame from the frame's blocks by name.
+//! A pack core shader's Polytone blocks beyond the pipeline's own: its expression uniforms
+//! (`shader_modifiers`, wiki "Expression Uniforms on Any Shader"), one float each, and
+//! `PolyGlobals` (wiki "Extra Shader Uniforms"), at their [`CoreProgram::other`] bindings, written
+//! each frame from the frame's blocks by name.
 
 use crate::core_shader::CoreProgram;
 use std::collections::BTreeMap;
+
+/// The block of Polytone's globals, which a pack's core shader may declare.
+pub(crate) const POLY_GLOBALS: &str = "PolyGlobals";
 
 /// The blocks of one pipeline, laid out in its uniform buffer from `base`, 256 bytes apart.
 #[derive(Debug, Default)]
@@ -26,6 +30,11 @@ impl ExpressionBlocks {
         Self { blocks, base }
     }
 
+    /// A block's size: `PolyGlobals` its own, an expression uniform one float.
+    fn block_size(name: &str) -> u64 {
+        if name == POLY_GLOBALS { 176 } else { 16 }
+    }
+
     fn offset(&self, i: usize) -> u64 {
         self.base + 256 * i as u64
     }
@@ -38,13 +47,13 @@ impl ExpressionBlocks {
     pub(crate) fn layout(&self) -> impl Iterator<Item = wgpu::BindGroupLayoutEntry> + '_ {
         self.blocks
             .iter()
-            .map(|(binding, _)| wgpu::BindGroupLayoutEntry {
+            .map(|(binding, name)| wgpu::BindGroupLayoutEntry {
                 binding: *binding,
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(16),
+                    min_binding_size: wgpu::BufferSize::new(Self::block_size(name)),
                 },
                 count: None,
             })
@@ -57,12 +66,12 @@ impl ExpressionBlocks {
         self.blocks
             .iter()
             .enumerate()
-            .map(move |(i, (binding, _))| wgpu::BindGroupEntry {
+            .map(move |(i, (binding, name))| wgpu::BindGroupEntry {
                 binding: *binding,
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer,
                     offset: self.offset(i),
-                    size: wgpu::BufferSize::new(16),
+                    size: wgpu::BufferSize::new(Self::block_size(name)),
                 }),
             })
     }
@@ -76,9 +85,10 @@ impl ExpressionBlocks {
         data.resize(self.size() as usize, 0);
         for (i, (_, name)) in self.blocks.iter().enumerate() {
             let at = self.offset(i) as usize;
-            data[at..at + 16].fill(0);
+            let size = Self::block_size(name) as usize;
+            data[at..at + size].fill(0);
             if let Some(bytes) = frame.and_then(|f| f.get(name)) {
-                let n = bytes.len().min(16);
+                let n = bytes.len().min(size);
                 data[at..at + n].copy_from_slice(&bytes[..n]);
             }
         }
