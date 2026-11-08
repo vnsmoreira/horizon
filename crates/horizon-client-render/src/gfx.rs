@@ -183,6 +183,7 @@ pub(crate) mod animate;
 mod arena;
 pub mod capture;
 pub mod compositor;
+pub(crate) mod core_clouds;
 pub mod core_lightmap;
 pub(crate) mod core_lines;
 mod core_particles;
@@ -1227,6 +1228,8 @@ pub struct Renderer {
     core_sky: Option<core_sky::CoreSky>,
     /// A resource pack's `core/lightmap`, which draws the light texture in place of the native one.
     core_lightmap: Option<core_lightmap::CoreLightmap>,
+    /// A resource pack's `core/clouds`, which draws the clouds in place of the native ones.
+    core_clouds: Option<core_clouds::CoreClouds>,
     /// Polytone GPU particle types with their own shader, and this frame's batches of them.
     core_particles: core_particles::CoreParticles,
     polytone_shader_batches: Vec<crate::particles::polytone_gpu::ShaderBatch>,
@@ -4820,6 +4823,7 @@ impl Renderer {
             core_lines: None,
             core_sky: None,
             core_lightmap: None,
+            core_clouds: None,
             core_particles,
             polytone_shader_batches: Vec::new(),
             debug_lines_opaque,
@@ -9119,28 +9123,27 @@ impl Renderer {
         }
         // Polytone GPU particles with their own shader: the vanilla blocks as the block outline's
         // (a particle's ModelViewMat is the camera's rotation, its positions camera relative).
+        // The vanilla blocks as the block outline's, for the packs' particles and clouds.
+        let core_vanilla = core_lines::uniforms(
+            core_globals,
+            views.primary(),
+            pose,
+            jitter,
+            1.0,
+            fog_color,
+            core_fog,
+        );
         let mut polytone_batches = std::mem::take(&mut self.polytone_shader_batches);
         if frame.title {
             polytone_batches.clear();
         }
-        let vanilla = (!polytone_batches.is_empty()).then(|| {
-            core_lines::uniforms(
-                core_globals,
-                views.primary(),
-                pose,
-                jitter,
-                1.0,
-                fog_color,
-                core_fog,
-            )
-        });
         self.core_particles.prepare(
             &self.device,
             &self.queue,
             self.output.frame.format,
             (&self.lightmap_view, &self.lightmap_sampler),
             &polytone_batches,
-            vanilla.as_deref().unwrap_or_default(),
+            &core_vanilla,
         );
         let skin = frame.skin.filter(|skin| match &mut self.entity_skin {
             Some(skinner) => skinner.register(&self.device, &mut self.uploads, &mut encoder, skin),
@@ -9242,7 +9245,30 @@ impl Renderer {
             - native_cutout_quads
             - native_cutout_mipped_quads;
         let native_clouds = self.native.as_ref().is_none_or(|n| n.vanilla_clouds);
-        let cloud_quads = if let Some(input) = frame.clouds.as_ref().filter(|_| native_clouds) {
+        // A pack's core/clouds draws them instead, outside improved transparency's passes.
+        let pack_clouds = native_clouds
+            && !oit_on
+            && !frame.title
+            && self.core_clouds.is_some()
+            && frame.clouds.is_some();
+        if pack_clouds
+            && let (Some(core), Some(input)) = (self.core_clouds.as_mut(), frame.clouds.as_ref())
+        {
+            let vanilla = core_vanilla.clone();
+            core.prepare(
+                &self.device,
+                &mut self.uploads,
+                &mut encoder,
+                vanilla,
+                input,
+                pack_blocks,
+            );
+        }
+        let cloud_input = frame
+            .clouds
+            .as_ref()
+            .filter(|_| native_clouds && !pack_clouds);
+        let cloud_quads = if let Some(input) = cloud_input {
             let (rebuilt, uniform) =
                 crate::spans::time("clouds", || self.cloud_mesh.prepare(input));
             let vertices = self.cloud_mesh.vertices.len() as u64;
@@ -11200,6 +11226,9 @@ impl Renderer {
                     ((entity_quads + text_quads + crumbling_quads) * 4) as i32,
                     0..1,
                 );
+            }
+            if pack_clouds && !pack_draws_clouds {
+                self.draw_core_clouds(&mut pass, frame);
             }
             if cloud_quads > 0 && !pack_draws_clouds && !oit_on {
                 pass.set_pipeline(&self.cloud_pipeline);

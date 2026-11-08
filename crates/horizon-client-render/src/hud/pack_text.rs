@@ -103,6 +103,8 @@ pub struct CoreShaders {
     pub stars: Option<Arc<CoreProgram>>,
     /// `core/lightmap` (with `core/screenquad`), when a pack replaces either.
     pub lightmap: Option<Arc<CoreProgram>>,
+    /// `core/clouds`.
+    pub clouds: Option<Arc<CoreProgram>>,
 }
 
 /// The packs' core shaders the atlas carries ([`CoreShaders`]).
@@ -159,6 +161,21 @@ pub(super) fn load_shaders(atlas: &mut super::HudAtlas, root: &Path, defaults: &
             block == crate::gfx::core_lightmap::INFO_BLOCK
                 || block == crate::gfx::expression_blocks::POLY_GLOBALS
                 || lightmap_uniforms.iter().any(|n| n == block)
+        },
+    );
+    let clouds_uniforms = given(&["minecraft:core/clouds"]);
+    core.clouds = load_pair(
+        root,
+        defaults,
+        ("clouds", "clouds"),
+        &[],
+        &crate::gfx::core_clouds::GLUE,
+        &|block| {
+            matches!(
+                block,
+                crate::gfx::core_clouds::INFO_BLOCK | crate::gfx::core_clouds::FACES
+            ) || block == crate::gfx::expression_blocks::POLY_GLOBALS
+                || clouds_uniforms.iter().any(|n| n == block)
         },
     );
 }
