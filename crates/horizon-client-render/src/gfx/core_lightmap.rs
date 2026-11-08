@@ -18,6 +18,9 @@ pub(crate) const GLUE: Glue = Glue {
 /// The block `Lightmap.render` fills, beside the vanilla ones.
 pub(crate) const INFO_BLOCK: &str = "LightmapInfo";
 
+/// The pipeline's shader ids, which a pack's `shader_modifiers` target.
+pub const STAGES: [&str; 2] = ["minecraft:core/screenquad", "minecraft:core/lightmap"];
+
 /// Each vanilla uniform block's offset in the one buffer (`core_shader::BLOCKS` order), then
 /// `LightmapInfo`'s.
 const BLOCK_OFFSETS: [u64; 4] = [0, 256, 512, 768];
@@ -111,6 +114,14 @@ pub(super) struct CoreLightmap {
     pipeline: wgpu::RenderPipeline,
     group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
+    /// The packs' expression uniforms the shader reads (`shader_modifiers`), in their blocks'
+    /// order after `LightmapInfo`'s.
+    extra: Vec<String>,
+}
+
+/// The offset of the `i`th expression uniform's block.
+fn extra_offset(i: usize) -> u64 {
+    INFO_OFFSET + 256 * (i as u64 + 1)
 }
 
 impl CoreLightmap {
@@ -122,9 +133,14 @@ impl CoreLightmap {
             .iter()
             .position(|n| n == INFO_BLOCK)
             .map(crate::core_shader::other_binding);
-        if program.other.iter().any(|n| n != INFO_BLOCK) {
-            return None;
-        }
+        // The others are the expression uniforms the loader let through.
+        let extra: Vec<(u32, String)> = program
+            .other
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| *n != INFO_BLOCK)
+            .map(|(i, n)| (crate::core_shader::other_binding(i), n.clone()))
+            .collect();
         // A pack's shader is untrusted: the backend failing to compile it is an internal error.
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
@@ -150,13 +166,14 @@ impl CoreLightmap {
             .map(|binding| block(binding, BLOCK_SIZES[binding as usize]))
             .collect();
         entries.extend(info_binding.map(|b| block(b, INFO_SIZE)));
+        entries.extend(extra.iter().map(|(b, _)| block(*b, 16)));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Resource pack lightmap"),
             entries: &entries,
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Resource pack lightmap"),
-            size: INFO_OFFSET + 256,
+            size: extra_offset(extra.len()),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -172,6 +189,12 @@ impl CoreLightmap {
             .map(|i| range(i as u32, BLOCK_OFFSETS[i], BLOCK_SIZES[i]))
             .collect();
         resources.extend(info_binding.map(|b| range(b, INFO_OFFSET, INFO_SIZE)));
+        resources.extend(
+            extra
+                .iter()
+                .enumerate()
+                .map(|(i, (b, _))| range(*b, extra_offset(i), 16)),
+        );
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Resource pack lightmap"),
             layout: &layout,
@@ -216,18 +239,29 @@ impl CoreLightmap {
             pipeline,
             group,
             uniform,
+            extra: extra.into_iter().map(|(_, n)| n).collect(),
         })
     }
 
-    /// The buffer and offsets the frame's blocks go to: `globals` at 0, `info` at its own.
+    /// The buffer and the bytes the frame's blocks write to it: `globals` at 0, `info` at its
+    /// own, and each expression uniform from `blocks` by its name (0 where a frame has none).
     pub(super) fn uniforms(
         &self,
         globals: [u8; 48],
         info: &LightmapInfo,
+        blocks: Option<&std::collections::BTreeMap<String, Vec<u8>>>,
     ) -> (&wgpu::Buffer, Vec<u8>) {
-        let mut data = vec![0u8; (INFO_OFFSET + INFO_SIZE) as usize];
+        let mut data = vec![0u8; extra_offset(self.extra.len()) as usize];
         data[..48].copy_from_slice(&globals);
-        data[INFO_OFFSET as usize..].copy_from_slice(&info.std140());
+        let info_at = INFO_OFFSET as usize;
+        data[info_at..info_at + INFO_SIZE as usize].copy_from_slice(&info.std140());
+        for (i, name) in self.extra.iter().enumerate() {
+            if let Some(bytes) = blocks.and_then(|b| b.get(name)) {
+                let at = extra_offset(i) as usize;
+                let n = bytes.len().min(16);
+                data[at..at + n].copy_from_slice(&bytes[..n]);
+            }
+        }
         (&self.uniform, data)
     }
 
@@ -268,6 +302,7 @@ impl super::Renderer {
         let gamma = (self.gamma - frame.darkness.0).max(0.0);
         let (night_vision, flicker) = (frame.night_vision, frame.block_flicker);
         let (boss_darken, globals) = (frame.boss_darken, self.pack_globals(frame));
+        let blocks = frame.post_effects.extras.map(|e| &e.blocks);
         // LightmapRenderStateExtractor.extract: what lightmap.fsh reads (NightVisionColor's
         // default is #999999).
         let info = LightmapInfo {
@@ -285,7 +320,7 @@ impl super::Renderer {
         if let Some(core) = &self.core_lightmap
             && !self.fullbright
         {
-            let (buffer, data) = core.uniforms(globals, &info);
+            let (buffer, data) = core.uniforms(globals, &info, blocks);
             self.uploads.buffer(encoder, buffer, 0, &data);
             let view = self.lightmap.create_view(&Default::default());
             core.draw(encoder, &view);
@@ -421,7 +456,7 @@ mod tests {
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            let (buffer, data) = core.uniforms([0; 48], &info);
+            let (buffer, data) = core.uniforms([0; 48], &info, None);
             queue.write_buffer(buffer, 0, &data);
             let mut encoder = device.create_command_encoder(&Default::default());
             core.draw(&mut encoder, &target.create_view(&Default::default()));
