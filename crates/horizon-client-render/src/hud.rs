@@ -908,7 +908,10 @@ impl HudAtlas {
             ("rendertype_lines", "rendertype_lines"),
             &[],
             &crate::gfx::core_lines::GLUE,
-            &|block| lines_uniforms.iter().any(|n| n == block),
+            &|block| {
+                block == crate::gfx::expression_blocks::POLY_GLOBALS
+                    || lines_uniforms.iter().any(|n| n == block)
+            },
         );
         let sky = |name: &str| {
             let uniforms = given(&[&format!("minecraft:core/{name}")]);
@@ -918,7 +921,10 @@ impl HudAtlas {
                 (name, name),
                 &[],
                 &crate::gfx::core_sky::GLUE,
-                &|block| uniforms.iter().any(|n| n == block),
+                &|block| {
+                    block == crate::gfx::expression_blocks::POLY_GLOBALS
+                        || uniforms.iter().any(|n| n == block)
+                },
             )
         };
         atlas.sky_shader = sky("sky");
@@ -932,6 +938,7 @@ impl HudAtlas {
             &crate::gfx::core_lightmap::GLUE,
             &|block| {
                 block == crate::gfx::core_lightmap::INFO_BLOCK
+                    || block == crate::gfx::expression_blocks::POLY_GLOBALS
                     || lightmap_uniforms.iter().any(|n| n == block)
             },
         );
