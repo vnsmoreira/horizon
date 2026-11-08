@@ -539,7 +539,7 @@ pub struct Particle {
     /// `Particle.random`: the particle's own generator (`RandomSource.create()`).
     random: LegacyRandom,
     controller: Option<Box<dyn native::Controller>>,
-    /// A resource pack's Polytone custom particle type, for its `limit`.
+    /// A resource pack's Polytone custom particle type, for its `limit` and `exclusion_radius`.
     polytone_type: Option<std::sync::Arc<str>>,
     /// A Polytone model particle's faces, drawn instead of its sprite quad.
     model: Option<std::sync::Arc<polytone_model::ParticleModel>>,
