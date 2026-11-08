@@ -1328,6 +1328,8 @@ pub struct ParticleEngine {
     polytone_ticks: u64,
     /// The heightmap the GPU particle shaders read (`Sampler1`) and the tick it was taken.
     polytone_heightmap: Option<(polytone_gpu::HeightmapArea, u64)>,
+    /// That heightmap's heights, for the GPU types drawn without a shader of their own.
+    polytone_surface: Option<polytone_gpu::Surface>,
     /// The last frame's additively blended quads (`take_additive`).
     additive: std::sync::Mutex<Vec<Vertex>>,
     emitters: Vec<TrackingEmitter>,
@@ -1527,6 +1529,7 @@ impl ParticleEngine {
             polytone_gpu: Vec::new(),
             polytone_ticks: 0,
             polytone_heightmap: None,
+            polytone_surface: None,
             additive: std::sync::Mutex::default(),
             emitters: Vec::new(),
             starters: Vec::new(),
@@ -5102,6 +5105,7 @@ impl ParticleEngine {
                 partial,
                 &mut light_cache,
                 light_at,
+                self.polytone_surface.as_ref(),
                 out,
                 &mut additive,
             );
