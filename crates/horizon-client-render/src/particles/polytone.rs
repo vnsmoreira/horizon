@@ -48,6 +48,8 @@ pub struct Registry {
     /// The particle modifiers with their colormaps, and by particle type the ones aimed at it.
     particle_modifiers: Vec<(ParticleModifier, Option<Tint>, Option<Filter>)>,
     modifiers_by_type: Mutex<HashMap<String, Arc<[usize]>>>,
+    /// The GPU particle types' own shaders (`shader`) that translated, by type id.
+    gpu_shaders: HashMap<String, Arc<super::polytone_gpu::GpuShader>>,
 }
 
 /// A sound for the engine's queue: id, position, volume, pitch, delayed by the distance.
@@ -279,6 +281,10 @@ impl Registry {
                 }
             })
             .collect();
+        let gpu_shaders = types
+            .iter()
+            .filter_map(|(id, def)| Some((id.clone(), Arc::new(gpu_shader(pack_root, id, def)?))))
+            .collect();
         Self {
             types,
             block_emitters,
@@ -295,7 +301,42 @@ impl Registry {
             sounds: Mutex::default(),
             particle_modifiers,
             modifiers_by_type: Mutex::default(),
+            gpu_shaders,
         }
+    }
+
+    /// The GPU particle type `id`'s own shader, when it has one that translated.
+    pub(super) fn gpu_shader(&self, id: &str) -> Option<Arc<super::polytone_gpu::GpuShader>> {
+        self.gpu_shaders.get(id).cloned()
+    }
+
+    /// `shader`'s uniforms this frame, from the camera at `camera` (an expression that fails to
+    /// run gives 0, as an unset uniform reads).
+    pub(super) fn gpu_uniforms(
+        &self,
+        shader: &super::polytone_gpu::GpuShader,
+        camera: [f64; 3],
+    ) -> Vec<(String, f32)> {
+        let Ok(frame) = self.frame.read() else {
+            return Vec::new();
+        };
+        let mut random = LegacyRandom::new(0);
+        let (mut custom, mut customs) = (0.0, BTreeMap::new());
+        let mut ctx = Ctx {
+            subject: Subject::Entity(camera),
+            random: &mut random,
+            custom: &mut custom,
+            customs: &mut customs,
+            frame: &frame,
+            registry: self,
+            level: None,
+            blocks: Vec::new(),
+        };
+        shader
+            .uniforms
+            .iter()
+            .map(|(name, program)| (name.clone(), eval(program, &mut ctx).unwrap_or(0.0) as f32))
+            .collect()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1183,7 +1224,7 @@ pub(super) fn make(
     position: [f64; 3],
     velocity: [f64; 3],
     seed: i64,
-) -> Option<Particle> {
+) -> Option<(Particle, f64)> {
     // `limit`: at most that many of the type alive at once.
     // (A GPU particle's `limit` is its ring of records instead.)
     if let Some(limit) = def.limit
@@ -1310,7 +1351,93 @@ pub(super) fn make(
         tint: registry.tints.get(name).cloned(),
         tinting: Tinting::default(),
     }));
-    Some(particle)
+    Some((particle, custom))
+}
+
+/// GPU particle type `id`'s own shader (`shader`, wiki "GPU Particles"): its core shader
+/// (`assets/<ns>/shaders/core/<name>.vsh` and `.fsh`) translated with the record as its vertex
+/// format and `polytone:gpu_particle.glsl` as Horizon lays it out, its texture and its uniforms.
+/// `None` (logged) when it has none, or it doesn't translate.
+fn gpu_shader(
+    pack_root: &Path,
+    id: &str,
+    def: &CustomParticle,
+) -> Option<super::polytone_gpu::GpuShader> {
+    use super::polytone_gpu::{
+        GLUE, GPU_BLOCK, GPU_PARTICLE_GLSL, GPU_PARTICLE_INCLUDE, GpuShader,
+    };
+    let gpu = def.gpu.as_ref()?;
+    let shader = def.render.get("shader")?.as_str()?;
+    let (namespace, name) = shader.split_once(':').unwrap_or(("minecraft", shader));
+    let read = |path: &str| std::fs::read_to_string(pack_root.join(path)).ok();
+    let stage = |extension: &str| {
+        read(&format!(
+            "assets/{namespace}/shaders/core/{name}.{extension}"
+        ))
+    };
+    let (Some(vertex), Some(fragment)) = (stage("vsh"), stage("fsh")) else {
+        log::warn!("custom particle {id}: shader {shader} not found");
+        return None;
+    };
+    let include = |include: &str| {
+        if include == GPU_PARTICLE_INCLUDE {
+            return Some(GPU_PARTICLE_GLSL.to_owned());
+        }
+        let (namespace, path) = include.split_once(':')?;
+        read(&format!("assets/{namespace}/{path}"))
+    };
+    // Wiki "GPU Particles": each of `uniforms` is a block of its own with one float.
+    let uniforms: Vec<(String, Program)> = def
+        .render
+        .get("uniforms")
+        .and_then(Json::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, expression)| {
+            let source = match expression {
+                Json::String(source) => source.clone(),
+                Json::Number(n) => n.to_string(),
+                _ => return None,
+            };
+            Program::compile(&source)
+                .map_err(|e| log::warn!("custom particle {id}: uniform {name}: {e}"))
+                .ok()
+                .map(|program| (name.clone(), program))
+        })
+        .collect();
+    let provided = |name: &str| name == GPU_BLOCK || uniforms.iter().any(|(n, _)| n == name);
+    let program = match crate::core_shader::translate_core_with(
+        &vertex,
+        &fragment,
+        &[],
+        &include,
+        &GLUE,
+        &provided,
+    ) {
+        Ok(program) => program,
+        Err(e) => {
+            log::warn!("custom particle {id}: shader {shader} is not used: {e}");
+            return None;
+        }
+    };
+    let texture = {
+        let (namespace, path) = gpu
+            .texture
+            .split_once(':')
+            .unwrap_or(("minecraft", &gpu.texture));
+        crate::sprites::read_rgba(&pack_root.join(format!("assets/{namespace}/{path}")))
+            .map(|(w, h, pixels)| (w, h, Arc::from(pixels)))
+            .map_err(|e| log::warn!("custom particle {id}: texture {}: {e}", gpu.texture))
+            .ok()
+    };
+    log::info!("custom particle {id}: shader {shader} is used");
+    Some(GpuShader {
+        id: shader.to_owned(),
+        program: Arc::new(program),
+        texture,
+        render_type: def.render_type,
+        uniforms,
+    })
 }
 
 /// A particle modifier's `filter`: the blocks and items (an id or a list each) whose particles
