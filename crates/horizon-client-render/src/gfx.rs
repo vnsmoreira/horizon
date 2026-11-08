@@ -184,6 +184,8 @@ mod arena;
 pub mod capture;
 pub mod compositor;
 pub(crate) mod core_lines;
+mod core_particles;
+pub use core_particles::HEIGHTMAP_SIZE as POLYTONE_HEIGHTMAP_SIZE;
 pub(crate) mod core_sky;
 mod cull;
 mod dx12_compiler;
@@ -1255,6 +1257,9 @@ pub struct Renderer {
     core_lines: Option<core_lines::CoreLines>,
     /// The packs' `core/sky` and `core/stars`, drawn in place of the native sky and stars.
     core_sky: Option<core_sky::CoreSky>,
+    /// Polytone GPU particle types with their own shader, and this frame's batches of them.
+    core_particles: core_particles::CoreParticles,
+    polytone_shader_batches: Vec<crate::particles::polytone_gpu::ShaderBatch>,
     /// Gizmo lines: opaque ones (`RenderTypes.lines`, which writes depth),
     /// translucent ones (`RenderTypes.linesTranslucentNoDepthWrite`) and the
     /// always-on-top ones.
@@ -5202,6 +5207,7 @@ impl Renderer {
             ));
         }
         let world_primitives = world_primitives::WorldPrimitives::new(&device, frame_format);
+        let core_particles = core_particles::CoreParticles::new(&device, &queue);
         Ok(Self {
             display: None,
             display_fresh: false,
@@ -5257,6 +5263,8 @@ impl Renderer {
             lines_secondary,
             core_lines: None,
             core_sky: None,
+            core_particles,
+            polytone_shader_batches: Vec::new(),
             debug_lines_opaque,
             debug_lines,
             debug_lines_on_top,
@@ -5601,6 +5609,18 @@ impl Renderer {
         let format = self.frame_format;
         self.core_lines =
             program.and_then(|program| core_lines::CoreLines::new(&self.device, format, program));
+    }
+    /// The Polytone GPU particle batches drawn by their own shaders the next frame
+    /// (`ParticleEngine::polytone_shader_batches`): the game refills it each frame.
+    pub fn polytone_shader_batches(
+        &mut self,
+    ) -> &mut Vec<crate::particles::polytone_gpu::ShaderBatch> {
+        &mut self.polytone_shader_batches
+    }
+    /// The motion-blocking heights those shaders read as `Sampler1`
+    /// ([`POLYTONE_HEIGHTMAP_SIZE`] columns a side, x along a row, above the world's bottom).
+    pub fn set_polytone_heightmap(&self, heights: &[u16]) {
+        self.core_particles.set_heightmap(&self.queue, heights);
     }
     /// The resource packs' `core/sky` and `core/stars` (`HudAtlas::sky_shader`,
     /// `stars_shader`), or the built-in sky and stars.
@@ -9725,6 +9745,44 @@ impl Renderer {
             });
             core.prepare(&mut self.uploads, &mut encoder, &sky, stars.as_deref());
         }
+        // Polytone GPU particles with their own shader: the vanilla blocks as the block outline's
+        // (a particle's ModelViewMat is the camera's rotation, its positions camera relative).
+        let polytone_batches = std::mem::take(&mut self.polytone_shader_batches);
+        if !polytone_batches.is_empty() && !frame.title {
+            let size = [self.config.width, self.config.height];
+            let block = crate::post_chain::Globals {
+                glint_alpha: frame.glint_alpha,
+                ..frame.post_effects.globals
+            }
+            .bytes(size, frame.post_effects.menu_blur_radius as i32);
+            let [sky_end, clouds_end, ..] = globals.fog_ends;
+            let vanilla = core_lines::uniforms(
+                block,
+                views.primary(),
+                pose,
+                jitter,
+                1.0,
+                fog_color,
+                [fog[0], fog[1], fog[2], fog[3], sky_end, clouds_end],
+            );
+            self.core_particles.prepare(
+                &self.device,
+                &self.queue,
+                self.frame_format,
+                (&self.lightmap_view, &self.lightmap_sampler),
+                &polytone_batches,
+                &vanilla,
+            );
+        } else {
+            self.core_particles.prepare(
+                &self.device,
+                &self.queue,
+                self.frame_format,
+                (&self.lightmap_view, &self.lightmap_sampler),
+                &[],
+                &[],
+            );
+        }
         let skin = frame.skin.filter(|skin| match &mut self.entity_skin {
             Some(skinner) => skinner.register(&self.device, &mut self.uploads, &mut encoder, skin),
             None => false,
@@ -11827,6 +11885,15 @@ impl Renderer {
                     ((world_quads + additive_quads + hand_quads) * 4) as i32,
                     0..1,
                 );
+            }
+            // Polytone GPU particles with their own shader draw after the world (wiki "GPU
+            // Particles"): after the clouds and the weather, which would otherwise cover the
+            // ones that write no depth.
+            if self
+                .core_particles
+                .draw(&mut pass, &self.indices, self.index_quads)
+            {
+                pass.set_bind_group(0, &self.group, &[]);
             }
             // Native mods' primitives: after the entities and the rest of the world, into its
             // targets (its resolution, reversed depth and TAA), before the hand.

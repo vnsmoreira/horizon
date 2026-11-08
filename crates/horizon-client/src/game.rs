@@ -8105,6 +8105,32 @@ impl Game<'_> {
             }
             self.finish_async_particle_culling();
         }
+        // Polytone GPU particles with their own shader: their heightmap (`Sampler1`) every
+        // half second and this frame's records go to the renderer.
+        if let Some(area) = self.particles.polytone_heightmap_due(
+            camera,
+            horizon_client::gfx::POLYTONE_HEIGHTMAP_SIZE,
+            world.bottom_y(),
+        ) {
+            let properties = &self.pack.assets.properties;
+            let size = area.size as i32;
+            let heights: Vec<u16> = (0..size * size)
+                .map(|i| {
+                    let (x, z) = (area.origin[0] + i % size, area.origin[1] + i / size);
+                    let top = render_tick::motion_blocking_height(world, properties, x, z);
+                    (top - area.min_y).clamp(0, i32::from(u16::MAX)) as u16
+                })
+                .collect();
+            if let Some(renderer) = &self.renderer {
+                renderer.set_polytone_heightmap(&heights);
+            }
+        }
+        let batches = self
+            .particles
+            .polytone_shader_batches(camera, alpha as f32, &|b| world.light(b[0], b[1], b[2]));
+        if let Some(renderer) = self.renderer.as_mut() {
+            *renderer.polytone_shader_batches() = batches;
+        }
         laps.lap("eg_particles");
         // Breaking progress overlays (destroy_stage_0..9): ours and the other players'.
         self.mark_stage(out.len(), "DESTROY");
