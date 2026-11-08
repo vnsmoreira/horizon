@@ -7249,6 +7249,7 @@ impl Game<'_> {
             }
             self.finish_async_particle_culling();
         }
+        self.polytone_gpu_particles(camera, alpha);
         laps.lap("eg_particles");
         // Breaking progress overlays (destroy_stage_0..9): ours and the other players'.
         self.mark_stage(out.len(), "DESTROY");
@@ -9591,22 +9592,12 @@ impl Game<'_> {
         let polytone_extras = match (&self.pack.polytone_post, &polytone_frame) {
             (Some(post), Some(frame)) => {
                 let view = bob * spin * horizon_client::camera::view_matrix(yaw, pitch);
-                let globals = horizon_client::polytone_post::PolyGlobals {
-                    // 26.3's reverse-Z projection, as the world's (and its depth) is.
-                    projection: glam::Mat4::perspective_rh(
-                        fov_degrees.to_radians(),
-                        size[0] as f32 / size[1].max(1) as f32,
-                        depth_far,
-                        0.05,
-                    ),
-                    model_view: view,
-                    sun_angle: sky.sun_angle.to_radians() - std::f32::consts::FRAC_PI_2,
-                    day_time: self.view_day_time().rem_euclid(24000) as f32,
-                    delta_time: delta_ticks,
-                    player: self.player.as_ref().map_or(camera.to_array(), |p| {
-                        [p.position.x, p.position.y, p.position.z]
-                    }),
-                };
+                let lens = [
+                    fov_degrees,
+                    size[0] as f32 / size[1].max(1) as f32,
+                    depth_far,
+                ];
+                let globals = self.poly_globals(view, lens, sky.sun_angle, delta_ticks, camera);
                 let (effects, extras) = post.frame(frame, &globals);
                 requested_post_effects.extend(effects);
                 Some(extras)
