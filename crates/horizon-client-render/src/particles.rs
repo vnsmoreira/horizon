@@ -1328,6 +1328,8 @@ pub struct ParticleEngine {
     polytone_ticks: u64,
     /// The heightmap the GPU particle shaders read (`Sampler1`) and the tick it was taken.
     polytone_heightmap: Option<(polytone_gpu::HeightmapArea, u64)>,
+    /// That heightmap's heights, for the GPU types drawn without a shader of their own.
+    polytone_surface: Option<polytone_gpu::Surface>,
     /// The last frame's additively blended quads (`take_additive`).
     additive: std::sync::Mutex<Vec<Vertex>>,
     emitters: Vec<TrackingEmitter>,
@@ -1527,6 +1529,7 @@ impl ParticleEngine {
             polytone_gpu: Vec::new(),
             polytone_ticks: 0,
             polytone_heightmap: None,
+            polytone_surface: None,
             additive: std::sync::Mutex::default(),
             emitters: Vec::new(),
             starters: Vec::new(),
@@ -1759,6 +1762,7 @@ impl ParticleEngine {
         if !same {
             self.polytone_gpu.clear();
             self.polytone_heightmap = None;
+            self.polytone_surface = None;
             self.polytone_overrides = registry
                 .iter()
                 .flat_map(|r| {
@@ -5129,23 +5133,25 @@ impl ParticleEngine {
                 partial,
                 &mut light_cache,
                 light_at,
+                self.polytone_surface.as_ref(),
                 out,
                 &mut additive,
             );
         }
     }
 
-    /// The heightmap area GPU particle shaders want refilled now (wiki "GPU Particles": the
+    /// The heightmap area GPU particles want refilled now (wiki "GPU Particles": the
     /// motion-blocking heights of `size` columns a side around the camera, every half second),
-    /// with `min_y` the world's bottom; `None` while no live type has a shader or the last one is
-    /// fresh. The caller fills it ([`polytone_gpu::HeightmapArea`]) and the batches read it.
+    /// with `min_y` the world's bottom; `None` while no live type reads it or the last one is
+    /// fresh. The caller fills it ([`polytone_gpu::HeightmapArea`]) for the shaders, and
+    /// [`Self::set_polytone_surface`] for the quads drawn here.
     pub fn polytone_heightmap_due(
         &mut self,
         camera: DVec3,
         size: u32,
         min_y: i32,
     ) -> Option<polytone_gpu::HeightmapArea> {
-        if !self.polytone_gpu.iter().any(|s| s.shader().is_some()) {
+        if !self.polytone_gpu.iter().any(|s| s.reads_heightmap()) {
             return None;
         }
         let now = self.polytone_ticks;
@@ -5166,6 +5172,14 @@ impl ParticleEngine {
         };
         self.polytone_heightmap = Some((area, now));
         Some(area)
+    }
+
+    /// The heights the caller filled for the area [`Self::polytone_heightmap_due`] asked for.
+    pub fn set_polytone_surface(&mut self, area: polytone_gpu::HeightmapArea, heights: &[u16]) {
+        self.polytone_surface = Some(polytone_gpu::Surface {
+            area,
+            heights: heights.into(),
+        });
     }
 
     /// The GPU particle types drawn by their own shaders (wiki "GPU Particles"): each one's live
