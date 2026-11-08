@@ -156,6 +156,31 @@ impl Game<'_> {
         }
     }
 
+    /// The packs' Polytone post chains' effects for this frame (into `effects`), and the blocks
+    /// they and the packs' core shaders read: the chains' own and the expression uniforms
+    /// (`shader_modifiers`). `None` without a frame of the packs' expressions.
+    pub(super) fn polytone_extras(
+        &self,
+        frame: Option<&horizon_client::environment::Frame>,
+        globals: Option<&horizon_client::polytone_post::PolyGlobals>,
+        effects: &mut Vec<String>,
+    ) -> Option<horizon_client::post_chain::Extras> {
+        let (frame, globals) = (frame?, globals?);
+        let mut extras = self.pack.polytone_post.as_ref().map(|post| {
+            let (chain_effects, extras) = post.frame(frame, globals);
+            effects.extend(chain_effects);
+            extras
+        });
+        // The packs' expression uniforms on the lightmap shader, beside the chains' blocks.
+        if let Some(modifiers) = &self.pack.shader_modifiers {
+            extras
+                .get_or_insert_default()
+                .blocks
+                .extend(modifiers.blocks(&horizon_client::gfx::core_lightmap::STAGES, frame));
+        }
+        extras
+    }
+
     pub(super) fn forward(&self) -> [f64; 3] {
         let (yaw, pitch) = (
             f64::from(self.yaw).to_radians(),
