@@ -243,6 +243,12 @@ impl ShaderModifiers {
             .collect()
     }
 
+    /// The blocks of every shader's uniforms this frame (a pipeline reads those it declares).
+    pub fn all_blocks(&self, frame: &Frame) -> Vec<(String, Vec<u8>)> {
+        let stages: Vec<&str> = self.shaders.iter().map(|(id, _)| id.as_str()).collect();
+        self.blocks(&stages, frame)
+    }
+
     fn uniforms(&self, stages: &[&str]) -> impl Iterator<Item = &(String, Program)> {
         self.shaders
             .iter()
