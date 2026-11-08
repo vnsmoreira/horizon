@@ -29,7 +29,7 @@ pub use horizon_client_core::particle_type::ParticleType;
 pub use horizon_items::firework::{DYE_FIREWORK_COLORS, FireworkExplosion, FireworkShape};
 mod native;
 pub mod polytone;
-mod polytone_gpu;
+pub mod polytone_gpu;
 mod polytone_model;
 pub use native::{ParticleController, ParticleUpdate};
 
@@ -1326,6 +1326,8 @@ pub struct ParticleEngine {
     /// The packs' GPU particles' records, one store per type, and the ticks they count in.
     polytone_gpu: Vec<polytone_gpu::Store>,
     polytone_ticks: u64,
+    /// The heightmap the GPU particle shaders read (`Sampler1`) and the tick it was taken.
+    polytone_heightmap: Option<(polytone_gpu::HeightmapArea, u64)>,
     /// The last frame's additively blended quads (`take_additive`).
     additive: std::sync::Mutex<Vec<Vertex>>,
     emitters: Vec<TrackingEmitter>,
@@ -1524,6 +1526,7 @@ impl ParticleEngine {
             polytone_overrides: HashMap::new(),
             polytone_gpu: Vec::new(),
             polytone_ticks: 0,
+            polytone_heightmap: None,
             additive: std::sync::Mutex::default(),
             emitters: Vec::new(),
             starters: Vec::new(),
@@ -1755,6 +1758,7 @@ impl ParticleEngine {
         };
         if !same {
             self.polytone_gpu.clear();
+            self.polytone_heightmap = None;
             self.polytone_overrides = registry
                 .iter()
                 .flat_map(|r| {
@@ -2223,18 +2227,20 @@ impl ParticleEngine {
             && let Some(def) = registry.get(name)
         {
             let (registry, def, name) = (registry.clone(), def.clone(), name.to_owned());
-            let particle = polytone::make(self, &registry, &name, &def, o, p, v, seed)?;
+            let (particle, custom) = polytone::make(self, &registry, &name, &def, o, p, v, seed)?;
             if def.gpu.is_some() {
                 // A GPU particle is only a record: it never becomes an engine particle.
                 let now = self.polytone_ticks;
                 let store = match self.polytone_gpu.iter().position(|s| s.is(&def)) {
                     Some(i) => &mut self.polytone_gpu[i],
                     None => {
-                        self.polytone_gpu.push(polytone_gpu::Store::new(&def)?);
+                        let shader = registry.gpu_shader(&name);
+                        self.polytone_gpu
+                            .push(polytone_gpu::Store::new(&def, shader)?);
                         self.polytone_gpu.last_mut()?
                     }
                 };
-                store.spawn(&particle, now, seed as u64);
+                store.spawn(&particle, custom, now, seed as u64);
                 return None;
             }
             return Some(particle);
@@ -5127,6 +5133,70 @@ impl ParticleEngine {
                 &mut additive,
             );
         }
+    }
+
+    /// The heightmap area GPU particle shaders want refilled now (wiki "GPU Particles": the
+    /// motion-blocking heights of `size` columns a side around the camera, every half second),
+    /// with `min_y` the world's bottom; `None` while no live type has a shader or the last one is
+    /// fresh. The caller fills it ([`polytone_gpu::HeightmapArea`]) and the batches read it.
+    pub fn polytone_heightmap_due(
+        &mut self,
+        camera: DVec3,
+        size: u32,
+        min_y: i32,
+    ) -> Option<polytone_gpu::HeightmapArea> {
+        if !self.polytone_gpu.iter().any(|s| s.shader().is_some()) {
+            return None;
+        }
+        let now = self.polytone_ticks;
+        let origin = [
+            camera.x.floor() as i32 - size as i32 / 2,
+            camera.z.floor() as i32 - size as i32 / 2,
+        ];
+        if let Some((area, at)) = self.polytone_heightmap
+            && now < at + 10
+            && area.min_y == min_y
+        {
+            return None;
+        }
+        let area = polytone_gpu::HeightmapArea {
+            origin,
+            size,
+            min_y,
+        };
+        self.polytone_heightmap = Some((area, now));
+        Some(area)
+    }
+
+    /// The GPU particle types drawn by their own shaders (wiki "GPU Particles"): each one's live
+    /// records with this frame's block and uniforms, for `Renderer::polytone_shader_batches`.
+    pub fn polytone_shader_batches(
+        &self,
+        camera: DVec3,
+        partial: f32,
+        light_at: &dyn Fn([i32; 3]) -> u8,
+    ) -> Vec<polytone_gpu::ShaderBatch> {
+        let Some(registry) = &self.polytone else {
+            return Vec::new();
+        };
+        let heightmap = self.polytone_heightmap.map(|(area, _)| area);
+        let mut light_cache = ParticleLightCache::default();
+        self.polytone_gpu
+            .iter()
+            .filter_map(|store| {
+                let uniforms = registry.gpu_uniforms(store.shader()?, camera.to_array());
+                store.shader_batch(
+                    camera,
+                    self.polytone_ticks,
+                    partial,
+                    &mut light_cache,
+                    light_at,
+                    heightmap,
+                    uniforms,
+                )
+            })
+            .filter(|batch| !batch.vertices.is_empty())
+            .collect()
     }
 }
 /// How brightly particle `ty` shines in HDR output, as `mesher::hdr_tier`: flames,
