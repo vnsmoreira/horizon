@@ -29,7 +29,7 @@ pub use horizon_client_core::particle_type::ParticleType;
 pub use horizon_items::firework::{DYE_FIREWORK_COLORS, FireworkExplosion, FireworkShape};
 mod native;
 pub mod polytone;
-mod polytone_gpu;
+pub mod polytone_gpu;
 mod polytone_model;
 pub use native::{ParticleController, ParticleUpdate};
 
@@ -1326,6 +1326,8 @@ pub struct ParticleEngine {
     /// The packs' GPU particles' records, one store per type, and the ticks they count in.
     polytone_gpu: Vec<polytone_gpu::Store>,
     polytone_ticks: u64,
+    /// The heightmap the GPU particle shaders read (`Sampler1`) and the tick it was taken.
+    polytone_heightmap: Option<(polytone_gpu::HeightmapArea, u64)>,
     /// The last frame's additively blended quads (`take_additive`).
     additive: std::sync::Mutex<Vec<Vertex>>,
     emitters: Vec<TrackingEmitter>,
@@ -1524,6 +1526,7 @@ impl ParticleEngine {
             polytone_overrides: HashMap::new(),
             polytone_gpu: Vec::new(),
             polytone_ticks: 0,
+            polytone_heightmap: None,
             additive: std::sync::Mutex::default(),
             emitters: Vec::new(),
             starters: Vec::new(),
@@ -1745,36 +1748,10 @@ impl ParticleEngine {
         particle.controller = Some(Box::new(controller));
         Some(particle)
     }
-    /// Sets (or clears) the resource packs' Polytone custom particle types.
-    pub fn set_polytone(&mut self, registry: Option<std::sync::Arc<polytone::Registry>>) {
-        let registry = registry.filter(|r| !r.is_empty());
-        let same = match (&self.polytone, &registry) {
-            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
-            (None, None) => true,
-            _ => false,
-        };
-        if !same {
-            self.polytone_gpu.clear();
-            self.polytone_overrides = registry
-                .iter()
-                .flat_map(|r| {
-                    ParticleType::ALL.iter().filter_map(|&ty| {
-                        let id = format!("minecraft:{}", ty.name());
-                        r.get(&id).is_some().then_some((ty, id))
-                    })
-                })
-                .collect();
-        }
-        self.polytone = registry;
-    }
     /// The quads the last render blends additively (`RenderPipelines` additive, src alpha and
     /// one), for the frame's additive pass.
     pub fn take_additive(&self) -> Vec<Vertex> {
         std::mem::take(&mut *self.additive.lock().unwrap_or_else(|e| e.into_inner()))
-    }
-    /// Live GPU particle records (spawns, before `area` spreads them), for tests and status.
-    pub fn polytone_gpu_records(&self) -> usize {
-        self.polytone_gpu.iter().map(polytone_gpu::Store::len).sum()
     }
     /// Choose a frame from this particle's declared sprite set.
     pub fn set_sprite_frame(&self, particle: &mut Particle, frame: usize) {
@@ -2223,18 +2200,20 @@ impl ParticleEngine {
             && let Some(def) = registry.get(name)
         {
             let (registry, def, name) = (registry.clone(), def.clone(), name.to_owned());
-            let particle = polytone::make(self, &registry, &name, &def, o, p, v, seed)?;
+            let (particle, custom) = polytone::make(self, &registry, &name, &def, o, p, v, seed)?;
             if def.gpu.is_some() {
                 // A GPU particle is only a record: it never becomes an engine particle.
                 let now = self.polytone_ticks;
                 let store = match self.polytone_gpu.iter().position(|s| s.is(&def)) {
                     Some(i) => &mut self.polytone_gpu[i],
                     None => {
-                        self.polytone_gpu.push(polytone_gpu::Store::new(&def)?);
+                        let shader = registry.gpu_shader(&name);
+                        self.polytone_gpu
+                            .push(polytone_gpu::Store::new(&def, shader)?);
                         self.polytone_gpu.last_mut()?
                     }
                 };
-                store.spawn(&particle, now, seed as u64);
+                store.spawn(&particle, custom, now, seed as u64);
                 return None;
             }
             return Some(particle);
