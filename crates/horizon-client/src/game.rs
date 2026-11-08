@@ -14768,36 +14768,43 @@ impl Game<'_> {
         let game_ticks = self.world.game_time as f64 + alpha;
         let delta_ticks = (game_ticks - self.polytone_post_ticks).clamp(0.0, 20.0) as f32;
         self.polytone_post_ticks = game_ticks;
-        let polytone_extras = match (&self.pack.polytone_post, &polytone_frame) {
-            (Some(post), Some(frame)) => {
-                let view = bob * spin * horizon_client::camera::view_matrix(yaw, pitch);
-                let globals = horizon_client::polytone_post::PolyGlobals {
-                    // 26.3's reverse-Z projection, as the world's (and its depth) is.
-                    projection: glam::Mat4::perspective_rh(
-                        fov_degrees.to_radians(),
-                        size[0] as f32 / size[1].max(1) as f32,
-                        depth_far,
-                        0.05,
-                    ),
-                    model_view: view,
-                    sun_angle: sky.sun_angle.to_radians() - std::f32::consts::FRAC_PI_2,
-                    day_time: self.view_day_time().rem_euclid(24000) as f32,
-                    delta_time: delta_ticks,
-                    player: self.player.as_ref().map_or(camera.to_array(), |p| {
-                        [p.position.x, p.position.y, p.position.z]
-                    }),
-                };
-                let (effects, extras) = post.frame(frame, &globals);
+        // Polytone's globals (wiki "Extra Shader Uniforms"), which its post chains and the packs'
+        // core shaders read.
+        let poly_globals = polytone_frame.is_some().then(|| {
+            let view = bob * spin * horizon_client::camera::view_matrix(yaw, pitch);
+            horizon_client::polytone_post::PolyGlobals {
+                // 26.3's reverse-Z projection, as the world's (and its depth) is.
+                projection: glam::Mat4::perspective_rh(
+                    fov_degrees.to_radians(),
+                    size[0] as f32 / size[1].max(1) as f32,
+                    depth_far,
+                    0.05,
+                ),
+                model_view: view,
+                sun_angle: sky.sun_angle.to_radians() - std::f32::consts::FRAC_PI_2,
+                day_time: self.view_day_time().rem_euclid(24000) as f32,
+                delta_time: delta_ticks,
+                player: self.player.as_ref().map_or(camera.to_array(), |p| {
+                    [p.position.x, p.position.y, p.position.z]
+                }),
+            }
+        });
+        let polytone_extras = match (&self.pack.polytone_post, &polytone_frame, &poly_globals) {
+            (Some(post), Some(frame), Some(globals)) => {
+                let (effects, extras) = post.frame(frame, globals);
                 requested_post_effects.extend(effects);
                 Some(extras)
             }
             _ => None,
         };
-        // The packs' expression uniforms on core shaders, beside the chains' blocks.
-        let polytone_extras = match (&self.pack.shader_modifiers, &polytone_frame) {
-            (Some(modifiers), Some(frame)) => {
+        // The packs' expression uniforms and the globals on core shaders, beside the chains' blocks.
+        let polytone_extras = match (&self.pack.shader_modifiers, &polytone_frame, &poly_globals) {
+            (Some(modifiers), Some(frame), Some(globals)) => {
                 let mut extras = polytone_extras.unwrap_or_default();
                 extras.blocks.extend(modifiers.all_blocks(frame));
+                extras
+                    .blocks
+                    .insert("PolyGlobals".to_owned(), globals.bytes());
                 Some(extras)
             }
             _ => polytone_extras,
