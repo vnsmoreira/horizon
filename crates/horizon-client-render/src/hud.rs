@@ -2864,6 +2864,7 @@ impl HudRenderer {
         encoder: &mut wgpu::CommandEncoder,
         batch: &HudBatch,
         size: [u32; 2],
+        blocks: Option<&std::collections::BTreeMap<String, Vec<u8>>>,
     ) {
         self.prepare_pictures(device, uploads, encoder, batch);
         self.upload_patches(uploads, encoder, &batch.patches);
@@ -2902,7 +2903,13 @@ impl HudRenderer {
             )),
         );
         if let Some(pack_text) = &self.pack_text {
-            pack_text.prepare(uploads, encoder, batch, size, batch.scale * self.zoom);
+            pack_text.prepare(
+                uploads,
+                encoder,
+                batch,
+                (size, batch.scale * self.zoom),
+                blocks,
+            );
         }
     }
     /// Draw the batch `prepare` staged.

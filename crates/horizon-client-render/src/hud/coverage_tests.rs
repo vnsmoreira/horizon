@@ -423,3 +423,44 @@ fn a_pack_text_shader_without_a_colour_output_is_dropped_not_wrapped() {
     gpu.hud.set_text_shader(&gpu.device, Some(&program));
     assert!(gpu.hud.pack_text.is_none());
 }
+
+#[test]
+fn a_pack_text_shader_reads_its_expression_uniforms() {
+    let Some(mut gpu) = Gpu::new() else {
+        return;
+    };
+    // A `shader_modifiers` uniform `Tint` (one float), as the translator binds a provided block.
+    let binding = crate::core_shader::other_binding(0);
+    let program = crate::core_shader::CoreProgram {
+        vertex: naga::front::wgsl::parse_str("@vertex fn main(@location(0) p: vec2<f32>) -> @builtin(position) vec4<f32> { return vec4(p.x / 2.0 - 1.0, 1.0 - p.y, 0.0, 1.0); }").unwrap(),
+        fragment: naga::front::wgsl::parse_str(&format!("struct Tint {{ v: f32 }} @group(0) @binding({binding}) var<uniform> tint: Tint; @fragment fn main() -> @location(0) vec4<f32> {{ return vec4(tint.v, tint.v, tint.v, 1.0); }}")).unwrap(),
+        other: vec!["Tint".into()],
+    };
+    gpu.hud.set_text_shader(&gpu.device, Some(&program));
+    let mut batch = HudBatch::new([4, 2]);
+    for x in [0.0, 2.0] {
+        quad(&mut batch, Blend::Alpha, rgba(255, 255, 255, 255), x, 0.25);
+    }
+    for v in &mut batch.vertices {
+        v.text = 1;
+    }
+    let mut tint = 0.6f32.to_le_bytes().to_vec();
+    tint.resize(16, 0);
+    let frame = std::collections::BTreeMap::from([("Tint".to_string(), tint)]);
+    let mut uploads = crate::gfx::upload::Uploads::new(&gpu.device);
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    gpu.hud.pack_text.as_ref().unwrap().prepare(
+        &mut uploads,
+        &mut encoder,
+        &batch,
+        ([4, 2], 1.0),
+        Some(&frame),
+    );
+    uploads.finish(&encoder);
+    gpu.queue.submit([encoder.finish()]);
+    let (pixels, _) = gpu.draw(&batch, 0.0, 0.0, false);
+    // 0.6 of 255, in every colour channel of the first texel.
+    for channel in &pixels[..3] {
+        assert!(channel.abs_diff(153) <= 1, "{:?}", &pixels[..4]);
+    }
+}
