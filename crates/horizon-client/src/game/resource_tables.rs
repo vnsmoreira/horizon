@@ -258,7 +258,7 @@ impl PackResources {
             polytone_particles,
             polytone_post,
             shader_modifiers,
-            polytone_colors: Arc::new(horizon_client::polytone_colors::PackColors::read(root)),
+            polytone_colors: Arc::new(read_colors(root)),
         }
     }
 }
@@ -297,4 +297,11 @@ fn pack_particles(
     ));
     let registry = horizon_client::particles::polytone::Registry::read(root, configs, blocks);
     (!registry.is_empty()).then(|| Arc::new(registry))
+}
+
+/// The packs' custom colours; their dye and sheep colours go to the draw paths' table.
+fn read_colors(root: &std::path::Path) -> horizon_client::polytone_colors::PackColors {
+    let colors = horizon_client::polytone_colors::PackColors::read(root);
+    horizon_client::pack_dyes::set(&colors);
+    colors
 }
