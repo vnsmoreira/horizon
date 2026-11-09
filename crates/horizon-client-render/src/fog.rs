@@ -590,7 +590,10 @@ mod tests {
         let mut input = inputs(&sky);
         input.blindness = Some((-1, true));
         input.environment = environment;
-        assert_eq!(setup_fog(&tables, &FogState::default(), &input).environmental_end, 40.0);
+        assert_eq!(
+            setup_fog(&tables, &FogState::default(), &input).environmental_end,
+            40.0
+        );
         input.blindness = None;
         input.fog_type = FogType::PowderSnow;
         let fog = setup_fog(&tables, &FogState::default(), &input);
