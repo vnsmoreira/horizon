@@ -14,6 +14,7 @@ use wgpu::util::DeviceExt;
 
 pub mod cit_glint;
 mod pack_text;
+pub(crate) mod sprite_modifiers;
 
 /// A sprite's atlas region, and its size in GUI pixels: the size of the
 /// default resources' texture of that name, whatever the resolution of the
@@ -108,6 +109,8 @@ pub struct HudAtlas {
     pub clouds_shader: Option<std::sync::Arc<horizon_shaders::CoreProgram>>,
     /// The packs' `core/lightmap` (with `core/screenquad`), when a pack replaces either.
     pub lightmap_shader: Option<std::sync::Arc<horizon_shaders::CoreProgram>>,
+    /// The packs' Polytone screen sprite modifiers.
+    pub sprite_modifiers: std::sync::Arc<sprite_modifiers::SpriteModifiers>,
     /// The packs' OptiFine random entity textures, whose variants this atlas packs.
     pub random_textures: horizon_optifine::random_textures::RandomTextures,
     /// Their emissive overlays (`_e`), packed here too.
@@ -891,74 +894,11 @@ impl HudAtlas {
     /// mods holds none of them.
     pub fn build_over_with_image(root: &Path, defaults: &Path, mod_image: bool) -> Result<Self> {
         let mut atlas = Self::pack(root, defaults, WALKED_TEXTURE_FOLDERS, true, mod_image)?;
-        // The packs' expression uniforms (`shader_modifiers`) are blocks a shader is given too.
-        let modifiers = crate::polytone_post::ShaderModifiers::read(
+        pack_text::load_shaders(&mut atlas, root, defaults);
+        atlas.sprite_modifiers = std::sync::Arc::new(sprite_modifiers::SpriteModifiers::read(
             root,
-            crate::packs::polytone_configs(&crate::packs::Source::Dir(root.to_path_buf())),
-        );
-        let given = |stages: &[&str]| -> Vec<String> {
-            modifiers
-                .as_ref()
-                .map(|m| m.names(stages))
-                .unwrap_or_default()
-        };
-        atlas.text_shader = pack_text::load(root, defaults, &given(&pack_text::STAGES));
-        let lines_uniforms = given(&["minecraft:core/rendertype_lines"]);
-        atlas.lines_shader = pack_text::load_pair(
-            root,
-            defaults,
-            ("rendertype_lines", "rendertype_lines"),
-            &[],
-            &crate::gfx::core_lines::GLUE,
-            &|block| {
-                block == crate::gfx::expression_blocks::POLY_GLOBALS
-                    || lines_uniforms.iter().any(|n| n == block)
-            },
-        );
-        let sky = |name: &str| {
-            let uniforms = given(&[&format!("minecraft:core/{name}")]);
-            pack_text::load_pair(
-                root,
-                defaults,
-                (name, name),
-                &[],
-                &crate::gfx::core_sky::GLUE,
-                &|block| {
-                    block == crate::gfx::expression_blocks::POLY_GLOBALS
-                        || uniforms.iter().any(|n| n == block)
-                },
-            )
-        };
-        atlas.sky_shader = sky("sky");
-        atlas.stars_shader = sky("stars");
-        let clouds_uniforms = given(&["minecraft:core/clouds"]);
-        atlas.clouds_shader = pack_text::load_pair(
-            root,
-            defaults,
-            ("clouds", "clouds"),
-            &[],
-            &crate::gfx::core_clouds::GLUE,
-            &|block| {
-                matches!(
-                    block,
-                    crate::gfx::core_clouds::INFO_BLOCK | crate::gfx::core_clouds::FACES
-                ) || block == crate::gfx::expression_blocks::POLY_GLOBALS
-                    || clouds_uniforms.iter().any(|n| n == block)
-            },
-        );
-        let lightmap_uniforms = given(&crate::gfx::core_lightmap::STAGES);
-        atlas.lightmap_shader = pack_text::load_pair(
-            root,
-            defaults,
-            ("screenquad", "lightmap"),
-            &[],
-            &crate::gfx::core_lightmap::GLUE,
-            &|block| {
-                block == crate::gfx::core_lightmap::INFO_BLOCK
-                    || block == crate::gfx::expression_blocks::POLY_GLOBALS
-                    || lightmap_uniforms.iter().any(|n| n == block)
-            },
-        );
+            atlas.sprites.keys(),
+        ));
         Ok(atlas)
     }
     /// Empty slots written at run time: map textures (game/maps.rs), the
@@ -1042,6 +982,7 @@ impl HudAtlas {
             sky_shader: None,
             stars_shader: None,
             lightmap_shader: None,
+            sprite_modifiers: Default::default(),
             clouds_shader: None,
             random_textures: Default::default(),
             emissive: Arc::default(),
@@ -1111,6 +1052,7 @@ impl HudAtlas {
             sky_shader: None,
             stars_shader: None,
             lightmap_shader: None,
+            sprite_modifiers: Default::default(),
             clouds_shader: None,
             random_textures: Default::default(),
             emissive: Default::default(),
@@ -1691,6 +1633,7 @@ impl HudAtlas {
             sky_shader: None,
             stars_shader: None,
             lightmap_shader: None,
+            sprite_modifiers: Default::default(),
             clouds_shader: None,
             random_textures,
             emissive,

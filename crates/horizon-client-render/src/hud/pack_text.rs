@@ -93,6 +93,79 @@ pub(super) fn load_pair(
     }
 }
 
+/// The packs' core shaders the atlas carries (text, block outline, sky, stars, clouds, lightmap),
+/// each given `PolyGlobals` and the expression uniforms (`shader_modifiers`) aimed at it.
+pub(super) fn load_shaders(atlas: &mut super::HudAtlas, root: &Path, defaults: &Path) {
+    // The packs' expression uniforms (`shader_modifiers`) are blocks a shader is given too.
+    let modifiers = crate::polytone_post::ShaderModifiers::read(
+        root,
+        crate::packs::polytone_configs(&crate::packs::Source::Dir(root.to_path_buf())),
+    );
+    let given = |stages: &[&str]| -> Vec<String> {
+        modifiers
+            .as_ref()
+            .map(|m| m.names(stages))
+            .unwrap_or_default()
+    };
+    atlas.text_shader = load(root, defaults, &given(&STAGES));
+    let lines_uniforms = given(&["minecraft:core/rendertype_lines"]);
+    atlas.lines_shader = load_pair(
+        root,
+        defaults,
+        ("rendertype_lines", "rendertype_lines"),
+        &[],
+        &crate::gfx::core_lines::GLUE,
+        &|block| {
+            block == crate::gfx::expression_blocks::POLY_GLOBALS
+                || lines_uniforms.iter().any(|n| n == block)
+        },
+    );
+    let sky = |name: &str| {
+        let uniforms = given(&[&format!("minecraft:core/{name}")]);
+        load_pair(
+            root,
+            defaults,
+            (name, name),
+            &[],
+            &crate::gfx::core_sky::GLUE,
+            &|block| {
+                block == crate::gfx::expression_blocks::POLY_GLOBALS
+                    || uniforms.iter().any(|n| n == block)
+            },
+        )
+    };
+    atlas.sky_shader = sky("sky");
+    atlas.stars_shader = sky("stars");
+    let clouds_uniforms = given(&["minecraft:core/clouds"]);
+    atlas.clouds_shader = load_pair(
+        root,
+        defaults,
+        ("clouds", "clouds"),
+        &[],
+        &crate::gfx::core_clouds::GLUE,
+        &|block| {
+            matches!(
+                block,
+                crate::gfx::core_clouds::INFO_BLOCK | crate::gfx::core_clouds::FACES
+            ) || block == crate::gfx::expression_blocks::POLY_GLOBALS
+                || clouds_uniforms.iter().any(|n| n == block)
+        },
+    );
+    let lightmap_uniforms = given(&crate::gfx::core_lightmap::STAGES);
+    atlas.lightmap_shader = load_pair(
+        root,
+        defaults,
+        ("screenquad", "lightmap"),
+        &[],
+        &crate::gfx::core_lightmap::GLUE,
+        &|block| {
+            block == crate::gfx::core_lightmap::INFO_BLOCK
+                || block == crate::gfx::expression_blocks::POLY_GLOBALS
+                || lightmap_uniforms.iter().any(|n| n == block)
+        },
+    );
+}
+
 /// Each uniform block's offset in the one buffer (`core_shader::BLOCKS` order).
 const BLOCK_OFFSETS: [u64; 4] = [0, 256, 512, 768];
 const BLOCK_SIZES: [u64; 4] = [48, 64, 160, 48];
