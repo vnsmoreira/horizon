@@ -6798,6 +6798,31 @@ def projectile_fall_distance():
                        f'/forceload remove {x0} {z0}')
 
 
+def piglin_ghast_fireball():
+    """A ghast's fireball that hits a zombified piglin: `LargeFireball.onHitEntity` hurts it with `fireball`
+    damage (`#is_fire`, so a fire-immune piglin takes none), then `onHit` explodes with the ghast as the
+    explosion's indirect source."""
+    x0, y0, z0 = 4096 - 352, 270, 3648
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]},
+           cmd('/gamerule mob_griefing false', False), cmd('/difficulty normal', False),
+           cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} stone', False)]
+    ghast = '00003900-0000-0000-0000-000100000001'
+    piglin = '00003900-0000-0000-0000-000200000001'
+    ops += [cmd(f'/summon ghast {x0 + 8}.5 {y0 + 6} {z0 + 2}.5 {{UUID:[I;14592,0,1,1],NoAI:1b,NoGravity:1b,'
+                'PersistenceRequired:1b}', expect_result=1),
+            cmd(f'/summon zombified_piglin {x0 + 8}.5 {y0} {z0 + 10}.5 {{UUID:[I;14592,0,2,1],NoAI:1b,'
+                'PersistenceRequired:1b}', expect_result=1),
+            cmd(f'/summon fireball {x0 + 8}.5 {y0 + 0.5} {z0 + 8}.5 {{Owner:[I;14592,0,1,1],ExplosionPower:1b,'
+                'Motion:[0.0d,0.0d,0.6d],acceleration_power:0.1d}', expect_result=1)]
+    for _ in range(4):
+        ops.append({'op': 'tick', 'n': 1})
+        for key in ('Health', 'HurtTime', 'anger_end_time', 'angry_at'):
+            ops.append(cmd(f'/data get entity {piglin} {key}'))
+    ops.append(cmd(f'/execute if entity @e[type=fireball,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]'))
+    return ops + setup('/gamerule mob_griefing true', f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
+                       f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 8} {z0 + 15} air', f'/forceload remove {x0} {z0}')
+
+
 def loaded_ticket_removal(blocks=False):
     """Entity-ticking command visibility after forced tickets leave; FULL is separate."""
     targets = [(d, x, z) for d in range(2, 7)
@@ -7376,6 +7401,7 @@ def groups():
         ('piston entity tick order', piston_entity_tick_order()),
         ('primed tnt box', primed_tnt_box()),
         ('primed tnt fall', primed_tnt_fall()),
+        ('piglin ghast fireball', piglin_ghast_fireball()),
         ('projectile fall distance', projectile_fall_distance()),
         ('item fall distance', item_fall_distance()),
         ('beacon levels load', beacon_levels_load()),
