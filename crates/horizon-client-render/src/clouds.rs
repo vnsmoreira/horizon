@@ -175,7 +175,9 @@ pub fn drift(time: i64, partial_tick: f64, width: u32) -> f64 {
 }
 
 impl Input<'_> {
-    fn state(&self) -> (MeshKey, Uniform) {
+    /// The mesh around the camera's cell snapped to `snap` cells (1: vanilla's own mesh, which a
+    /// pack's core/clouds shader reads).
+    fn state(&self, snap: i64) -> (MeshKey, Uniform) {
         let (w, h, _) = self.texture;
         let offset = drift(self.time, self.partial_tick, *w);
         let mut x = self.camera.x + offset * 0.030_000_001;
@@ -183,8 +185,8 @@ impl Input<'_> {
         let (tw, th) = (f64::from(*w) * 12.0, f64::from(*h) * 12.0);
         x -= (x / tw).floor() * tw;
         z -= (z / th).floor() * th;
-        let cell_x = (x / 12.0).floor() as i64 / SNAP_CELLS * SNAP_CELLS;
-        let cell_z = (z / 12.0).floor() as i64 / SNAP_CELLS * SNAP_CELLS;
+        let cell_x = (x / 12.0).floor() as i64 / snap * snap;
+        let cell_z = (z / 12.0).floor() as i64 / snap * snap;
         let bottom = (CLOUD_HEIGHT - self.camera.y) as f32;
         // The inward faces of the 3x3 cells around the camera are only seen from inside the
         // layer; outside it they are back-facing, so the mesh need not follow the camera there.
@@ -201,7 +203,7 @@ impl Input<'_> {
             cell_x,
             cell_z,
             // One more ring than the range, for the cells the snapped origin can uncover.
-            radius: radius_cells(self.range) + SNAP_CELLS as i32,
+            radius: radius_cells(self.range) + if snap > 1 { snap as i32 } else { 0 },
             fast: self.fast,
             top: bottom <= 0.0,
             bottom: bottom + 4.0 >= 0.0,
@@ -354,7 +356,7 @@ impl Mesh {
     /// Returns true only when vertices must be uploaded. Sub-cell motion and
     /// color changes update only the uniform, as in CloudRenderer.prepare.
     pub fn prepare(&mut self, input: &Input<'_>) -> (bool, Uniform) {
-        let (key, uniform) = input.state();
+        let (key, uniform) = input.state(SNAP_CELLS);
         if self.key.as_ref() == Some(&key) {
             return (false, uniform);
         }
@@ -420,7 +422,7 @@ pub fn pack_faces(input: &Input<'_>) -> (Vec<i32>, [u8; 48]) {
     const SOUTH: i32 = 3;
     const WEST: i32 = 4;
     const EAST: i32 = 5;
-    let (key, uniform) = input.state();
+    let (key, uniform) = input.state(1);
     let (w, h, filled) = input.texture;
     let (w, h) = (*w as i32, *h as i32);
     let empty = |x: i32, y: i32| !filled[(y * w + x) as usize];
