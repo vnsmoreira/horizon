@@ -543,36 +543,6 @@ fn aabb_at(p: [f64; 3], w: f32, h: f32) -> Aabb {
         Vec3::new(p[0] + w, p[1] + f64::from(h), p[2] + w),
     )
 }
-/// ClientLevel.addBreakingParticles placement, using local outline boxes.
-pub fn breaking_position(
-    random: &mut impl RandomSource,
-    pos: [i32; 3],
-    face: [i32; 3],
-    boxes: &[[f64; 6]],
-) -> Option<[f64; 3]> {
-    let mut bounds = *boxes.first()?;
-    for b in &boxes[1..] {
-        for i in 0..3 {
-            bounds[i] = bounds[i].min(b[i]);
-            bounds[i + 3] = bounds[i + 3].max(b[i + 3]);
-        }
-    }
-    // Vanilla consumes all three doubles before replacing the hit-face coordinate.
-    let mut p = array::from_fn(|i| {
-        f64::from(pos[i])
-            + random.next_double() * (bounds[i + 3] - bounds[i] - f64::from(0.2f32))
-            + f64::from(0.1f32)
-            + bounds[i]
-    });
-    for i in 0..3 {
-        match face[i] {
-            -1 => p[i] = f64::from(pos[i]) + bounds[i] - f64::from(0.1f32),
-            1 => p[i] = f64::from(pos[i]) + bounds[i + 3] + f64::from(0.1f32),
-            _ => {}
-        }
-    }
-    Some(p)
-}
 
 /// A burst of particles about an entity's box (`around_self`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -5104,8 +5074,10 @@ const CREEPER: [[f64; 2]; 12] = [
     [0.0, -0.4],
 ];
 
+mod breaking;
 #[cfg(test)]
 mod tick_bench;
+pub use breaking::breaking_position;
 #[cfg(test)]
 mod tests {
     use super::*;
