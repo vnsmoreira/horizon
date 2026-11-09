@@ -861,17 +861,16 @@ impl MeshTables {
                     && props.get("sculk_sensor_phase").map(String::as_str) == Some("active"));
             // OffsetType.XZ/XYZ with getMaxHorizontalOffset/getMaxVerticalOffset.
             let offset = s.random_offset.then(|| {
-                let horizontal = if s.has_class("SpeleothemBlock") {
-                    0.125
-                } else {
-                    0.25
-                };
-                let vertical = match name {
-                    "small_dripleaf" => 0.1,
-                    "short_grass" | "fern" | "short_dry_grass" | "tall_dry_grass" => 0.2,
-                    _ => 0.0,
-                };
-                (horizontal, vertical)
+                let (horizontal, vertical) = max_offsets(s);
+                let xyz = matches!(
+                    name,
+                    "small_dripleaf"
+                        | "short_grass"
+                        | "fern"
+                        | "short_dry_grass"
+                        | "tall_dry_grass"
+                );
+                (horizontal, if xyz { vertical } else { 0.0 })
             });
             let mut face = [0u8; 6];
             let mut cover = [0f32; 6];
@@ -978,6 +977,35 @@ impl MeshTables {
                 if info.tint_count > 0 && targets.matches(&block.name, |_| false) {
                     info.colormap = Some(i);
                 }
+            }
+        }
+        self
+    }
+    /// The Polytone block modifiers' render offsets (`offset_type`) of the packs merged at
+    /// `pack_root` over the blocks' own: `xz` and `xyz` as vanilla's `OffsetType`s with the block's
+    /// own maximum offsets, `none` none.
+    #[must_use]
+    pub fn with_polytone_block_offsets(
+        mut self,
+        pack_root: &std::path::Path,
+        facts: &BlockFacts,
+    ) -> Self {
+        use horizon_polytone::blocks::BlockOffset;
+        let modifiers = crate::environment::polytone_block_offsets(pack_root);
+        if modifiers.is_empty() {
+            return self;
+        }
+        for (targets, offset) in &modifiers {
+            for (info, s) in self.info.iter_mut().zip(&facts.states) {
+                if !targets.matches(&s.name, |_| false) {
+                    continue;
+                }
+                let (horizontal, vertical) = max_offsets(s);
+                info.offset = match offset {
+                    BlockOffset::None => None,
+                    BlockOffset::Xz => Some((horizontal, 0.0)),
+                    BlockOffset::Xyz => Some((horizontal, vertical)),
+                };
             }
         }
         self
@@ -1134,6 +1162,20 @@ impl MeshTables {
     pub fn offset(&self, state: BlockStateId, x: i32, z: i32) -> Option<[f64; 3]> {
         offset(self.info.get(state.0 as usize)?, x, z)
     }
+}
+/// `BlockBehaviour.getMaxHorizontalOffset` and `getMaxVerticalOffset` of a state's block.
+fn max_offsets(s: &horizon_items::blocks::StateFacts) -> (f32, f32) {
+    let horizontal = if s.has_class("SpeleothemBlock") {
+        0.125
+    } else {
+        0.25
+    };
+    let vertical = if s.has_class("SmallDripleafBlock") {
+        0.1
+    } else {
+        0.2
+    };
+    (horizontal, vertical)
 }
 /// `OffsetType.XZ`/`XYZ`: a per-column jitter from `Mth.getSeed(x, 0, z)`.
 fn offset(info: &Info, x: i32, z: i32) -> Option<[f64; 3]> {
@@ -1370,6 +1412,8 @@ fn row_masks_match_cell_definition() {
 mod leaf_culling_tests;
 #[cfg(test)]
 mod opaque_ice_tests;
+#[cfg(test)]
+mod polytone_offset_tests;
 #[cfg(test)]
 mod reuse_tests;
 #[cfg(test)]

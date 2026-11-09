@@ -441,8 +441,10 @@ pub(super) fn load_resources(
         world_loading::preload_launch_world(folder, &root, assets.registry, biomes.clone());
     }
     let tables = Arc::new(startup::time("pack.mesh_tables", || {
-        MeshTables::new(&assets, &render, &facts, visibility)
-            .map(|t| t.with_polytone_colormaps(&root, assets.registry))
+        MeshTables::new(&assets, &render, &facts, visibility).map(|t| {
+            t.with_polytone_colormaps(&root, assets.registry)
+                .with_polytone_block_offsets(&root, &facts)
+        })
     })?);
     let pack_step = startup::step("pack.assemble");
     let pack = PackResources::assemble(

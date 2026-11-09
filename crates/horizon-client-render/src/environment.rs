@@ -448,52 +448,84 @@ impl Colormap {
     }
 }
 
-/// The colormaps of the Polytone block and fluid modifiers of the packs merged at `pack_root`:
-/// (a fluid modifier, its targets, the colormap's id). Inline colormaps aren't read.
-pub(crate) fn polytone_colormap_modifiers(
-    pack_root: &Path,
-) -> Vec<(bool, horizon_polytone::Targets, String)> {
+/// The JSON files of one kind of Polytone modifier (`block_modifiers`) in every namespace of the
+/// packs merged at `pack_root`, with their targets (the file's own name when they give none).
+fn polytone_modifier_files(pack_root: &Path, kind: &str) -> Vec<(horizon_polytone::Targets, Json)> {
     let mut out = Vec::new();
     let namespaces = std::fs::read_dir(pack_root.join("assets"))
         .into_iter()
         .flatten()
         .flatten();
     for namespace in namespaces {
-        for (kind, fluid) in [("block_modifiers", false), ("fluid_modifiers", true)] {
-            let mut stack = vec![namespace.path().join("polytone").join(kind)];
-            while let Some(dir) = stack.pop() {
-                for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        stack.push(path);
-                        continue;
-                    }
-                    let Ok(json) = horizon_world::json_file::read::<Json>(&path) else {
-                        continue;
-                    };
-                    let Some(id) = json.get("colormap").and_then(Json::as_str) else {
-                        continue;
-                    };
-                    let id = if id.contains(':') {
-                        id.to_owned()
-                    } else {
-                        format!("minecraft:{id}")
-                    };
-                    let relative = path
-                        .strip_prefix(pack_root)
-                        .unwrap_or(&path)
-                        .to_string_lossy();
-                    let implicit = horizon_polytone::implicit_id(&relative, kind);
-                    match horizon_polytone::Targets::parse(json.get("targets"), implicit.as_deref())
-                    {
-                        Ok(targets) => out.push((fluid, targets, id)),
-                        Err(e) => log::warn!("{relative}: {e}"),
-                    }
+        let mut stack = vec![namespace.path().join("polytone").join(kind)];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let Ok(json) = horizon_world::json_file::read::<Json>(&path) else {
+                    continue;
+                };
+                let relative = path
+                    .strip_prefix(pack_root)
+                    .unwrap_or(&path)
+                    .to_string_lossy();
+                let implicit = horizon_polytone::implicit_id(&relative, kind);
+                match horizon_polytone::Targets::parse(json.get("targets"), implicit.as_deref()) {
+                    Ok(targets) => out.push((targets, json)),
+                    Err(e) => log::warn!("{relative}: {e}"),
                 }
             }
         }
     }
     out
+}
+
+/// The colormaps of the Polytone block and fluid modifiers of the packs merged at `pack_root`:
+/// (a fluid modifier, its targets, the colormap's id). Inline colormaps aren't read.
+pub(crate) fn polytone_colormap_modifiers(
+    pack_root: &Path,
+) -> Vec<(bool, horizon_polytone::Targets, String)> {
+    let mut out = Vec::new();
+    for (kind, fluid) in [("block_modifiers", false), ("fluid_modifiers", true)] {
+        for (targets, json) in polytone_modifier_files(pack_root, kind) {
+            let Some(id) = json.get("colormap").and_then(Json::as_str) else {
+                continue;
+            };
+            let id = if id.contains(':') {
+                id.to_owned()
+            } else {
+                format!("minecraft:{id}")
+            };
+            out.push((fluid, targets, id));
+        }
+    }
+    out
+}
+
+/// The render offsets (`offset_type`) of the Polytone block modifiers of the packs merged at
+/// `pack_root`, with their targets.
+pub(crate) fn polytone_block_offsets(
+    pack_root: &Path,
+) -> Vec<(
+    horizon_polytone::Targets,
+    horizon_polytone::blocks::BlockOffset,
+)> {
+    polytone_modifier_files(pack_root, "block_modifiers")
+        .into_iter()
+        .filter_map(|(targets, json)| {
+            let offset = json.get("offset_type")?;
+            match horizon_polytone::blocks::BlockOffset::parse(offset) {
+                Ok(offset) => Some((targets, offset)),
+                Err(e) => {
+                    log::warn!("a Polytone block modifier's offset_type: {e}");
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 /// What a block colormap's axes read where it samples: the block (`o.x`, `o.biome()`, its
