@@ -258,6 +258,7 @@ impl PackResources {
             polytone_particles,
             polytone_post,
             shader_modifiers,
+            polytone_colors: Arc::new(horizon_client::polytone_colors::PackColors::read(root)),
         }
     }
 }
