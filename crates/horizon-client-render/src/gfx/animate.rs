@@ -84,7 +84,6 @@ pub(super) struct SpriteAnimator {
 struct AnimationModes {
     programs: Vec<(String, horizon_polytone::expr::Program)>,
     day_time: i64,
-    game_time: i64,
     weather: f32,
     values: std::collections::HashMap<String, f64>,
 }
@@ -120,7 +119,6 @@ impl super::Renderer {
     ) {
         let modes = &mut self.animations.modes;
         modes.day_time = day_time;
-        modes.game_time = frame.map_or(0, |f| f.game_time);
         modes.weather = rain + thunder;
         modes.values.clear();
         if let Some(frame) = frame {
@@ -363,7 +361,6 @@ impl SpriteAnimator {
         let expression = |source: &str| values.get(source).copied();
         let inputs = horizon_assets::animation::ModeInputs {
             day_time: self.modes.day_time,
-            game_time: self.modes.game_time,
             weather: self.modes.weather,
             expression: &expression,
         };
