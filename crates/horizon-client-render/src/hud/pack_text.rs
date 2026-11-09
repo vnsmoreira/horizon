@@ -30,26 +30,28 @@ const GLUE: Glue = Glue {
     vertex_id: "hz_vertex_id()",
 };
 
-/// The packs' text shader, when a pack replaces either stage.
-pub(super) fn load(root: &Path, defaults: &Path) -> Option<Arc<CoreProgram>> {
-    load_core(root, defaults, "text", &["IS_GUI"], &GLUE)
+/// The shader ids a pack's `shader_modifiers` name the text shader by.
+pub(super) const STAGES: [&str; 2] = ["minecraft:core/text", "minecraft:core/rendertype_text"];
+
+/// The packs' text shader, when a pack replaces either stage; it is given `PolyGlobals` and the
+/// expression uniforms named in `uniforms`.
+pub(super) fn load(root: &Path, defaults: &Path, uniforms: &[String]) -> Option<Arc<CoreProgram>> {
+    load_pair(
+        root,
+        defaults,
+        ("text", "text"),
+        &["IS_GUI"],
+        &GLUE,
+        &|block| {
+            block == crate::gfx::expression_blocks::POLY_GLOBALS
+                || uniforms.iter().any(|n| n == block)
+        },
+    )
 }
 
-/// The packs' core shader `name` (`shaders/core/<name>.vsh` and `.fsh`) over `defaults` (the
-/// game's own resources, which have vanilla's and its includes), when a pack replaces either
-/// stage.
-pub(super) fn load_core(
-    root: &Path,
-    defaults: &Path,
-    name: &str,
-    defines: &[&str],
-    glue: &Glue,
-) -> Option<Arc<CoreProgram>> {
-    load_pair(root, defaults, (name, name), defines, glue, &|_| false)
-}
-
-/// [`load_core`] for a pipeline whose stages have their own names (`core/screenquad` and
-/// `core/lightmap`) and that gives the blocks `provided` says yes to.
+/// The packs' core shader over `defaults` (the game's own resources, which have vanilla's and its
+/// includes), when a pack replaces either stage (`shaders/core/<vertex_name>.vsh` and
+/// `<name>.fsh`), given the blocks `provided` says yes to.
 pub(super) fn load_pair(
     root: &Path,
     defaults: &Path,
@@ -94,12 +96,16 @@ pub(super) fn load_pair(
 /// Each uniform block's offset in the one buffer (`core_shader::BLOCKS` order).
 const BLOCK_OFFSETS: [u64; 4] = [0, 256, 512, 768];
 const BLOCK_SIZES: [u64; 4] = [48, 64, 160, 48];
+/// The vanilla blocks' buffer, before the Polytone ones.
+const UNIFORM_SIZE: u64 = 1024;
 
 /// The pipeline and its resources.
 pub(super) struct PackText {
     pipeline: Pipeline,
     group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
+    /// Its `PolyGlobals` and expression uniforms, after the vanilla blocks.
+    extra: crate::gfx::expression_blocks::ExpressionBlocks,
 }
 
 impl PackText {
@@ -150,13 +156,16 @@ impl PackText {
                 count: None,
             });
         }
+        let extra =
+            crate::gfx::expression_blocks::ExpressionBlocks::new(program, &[], UNIFORM_SIZE);
+        entries.extend(extra.layout());
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Resource pack text"),
             entries: &entries,
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Resource pack text uniforms"),
-            size: 1024,
+            size: extra.size().max(UNIFORM_SIZE),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -185,6 +194,7 @@ impl PackText {
                 resource: wgpu::BindingResource::Sampler(&sampler),
             });
         }
+        resources.extend(extra.entries(&uniform));
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Resource pack text"),
             layout: &layout,
@@ -240,19 +250,23 @@ impl PackText {
             pipeline,
             group,
             uniform,
+            extra,
         })
     }
 
-    /// The frame's blocks, as `GuiRenderer` sets them for the GUI.
+    /// The frame's blocks, as `GuiRenderer` sets them for the GUI, and the Polytone ones from
+    /// `frame` (none in the menus: zeros).
     pub(super) fn prepare(
         &self,
         uploads: &mut crate::gfx::upload::Uploads,
         encoder: &mut wgpu::CommandEncoder,
         batch: &HudBatch,
-        size: [u32; 2],
-        scale: f32,
+        (size, scale): ([u32; 2], f32),
+        frame: Option<&std::collections::BTreeMap<String, Vec<u8>>>,
     ) {
-        uploads.buffer(encoder, &self.uniform, 0, &uniforms(batch, size, scale));
+        let mut data = uniforms(batch, size, scale);
+        self.extra.write(&mut data, frame);
+        uploads.buffer(encoder, &self.uniform, 0, &data);
     }
 
     /// Draw `range` (whole glyph quads) with the pack's shader; the caller sets its own
