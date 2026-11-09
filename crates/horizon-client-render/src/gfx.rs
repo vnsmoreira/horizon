@@ -10295,6 +10295,7 @@ impl Renderer {
             &mut encoder,
             frame.hud,
             [self.config.width, self.config.height],
+            frame.post_effects.extras.map(|e| &e.blocks),
         );
         if culling && let Some(cull) = &mut self.cull {
             cull.upload(

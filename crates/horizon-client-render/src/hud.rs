@@ -891,7 +891,6 @@ impl HudAtlas {
     /// mods holds none of them.
     pub fn build_over_with_image(root: &Path, defaults: &Path, mod_image: bool) -> Result<Self> {
         let mut atlas = Self::pack(root, defaults, WALKED_TEXTURE_FOLDERS, true, mod_image)?;
-        atlas.text_shader = pack_text::load(root, defaults);
         // The packs' expression uniforms (`shader_modifiers`) are blocks a shader is given too.
         let modifiers = crate::polytone_post::ShaderModifiers::read(
             root,
@@ -903,6 +902,7 @@ impl HudAtlas {
                 .map(|m| m.names(stages))
                 .unwrap_or_default()
         };
+        atlas.text_shader = pack_text::load(root, defaults, &given(&pack_text::STAGES));
         let lines_uniforms = given(&["minecraft:core/rendertype_lines"]);
         atlas.lines_shader = pack_text::load_pair(
             root,
@@ -3070,6 +3070,7 @@ impl HudRenderer {
         encoder: &mut wgpu::CommandEncoder,
         batch: &HudBatch,
         size: [u32; 2],
+        blocks: Option<&std::collections::BTreeMap<String, Vec<u8>>>,
     ) {
         self.upload_patches(uploads, encoder, &batch.patches);
         if batch.vertices.is_empty() || size.contains(&0) {
@@ -3107,7 +3108,13 @@ impl HudRenderer {
             )),
         );
         if let Some(pack_text) = &self.pack_text {
-            pack_text.prepare(uploads, encoder, batch, size, batch.scale * self.zoom);
+            pack_text.prepare(
+                uploads,
+                encoder,
+                batch,
+                (size, batch.scale * self.zoom),
+                blocks,
+            );
         }
     }
     /// Draw the batch `prepare` staged.
