@@ -3,8 +3,9 @@
 //! record (position, velocity, spawn time, lifetime, seed, colour, size, roll), and where it is,
 //! how big, what colour and which frame are a function of that record and the time. Here the
 //! function runs when the frame's particle quads are built, beside the engine's own particles.
-//! A type with its own `shader` instead hands its records to that shader ([`ShaderBatch`]),
-//! which computes the quads on the graphics card as the wiki's 1.21.11 format describes.
+//! A type with its own `shader` also gets its records ready for that shader ([`ShaderBatch`]),
+//! which computes the quads on the graphics card as the wiki's 1.21.11 format describes; until
+//! the renderer draws those, the type keeps its quads here.
 use super::{ParticleLevel, ParticleLightCache};
 use crate::hud::Rect;
 use crate::mesher::Vertex;
@@ -240,7 +241,7 @@ impl Store {
         out: &mut Vec<Vertex>,
         additive: &mut Vec<Vertex>,
     ) {
-        if self.def.render_type == RenderType::Invisible || self.shader.is_some() {
+        if self.def.render_type == RenderType::Invisible {
             return;
         }
         let Some(&(rect, _)) = atlas.get(&self.sprite) else {
