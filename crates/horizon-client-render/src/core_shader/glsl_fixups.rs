@@ -176,6 +176,35 @@ fn replace_ident(text: &str, from: &str, to: &str) -> String {
     super::replace_ident(text, from, to)
 }
 
+/// The byte after `uniform sampler2D <name>;`, where the shader declares that sampler.
+fn sampler_declaration_end(text: &str, name: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(found) = text[from..].find("sampler2D") {
+        let at = from + found;
+        from = at + "sampler2D".len();
+        let before = text[..at].trim_end();
+        if !before.ends_with("uniform")
+            || before[..before.len() - 7]
+                .chars()
+                .next_back()
+                .is_some_and(is_ident)
+        {
+            continue;
+        }
+        let rest = &text[from..];
+        let ident = rest.trim_start();
+        let len = ident.chars().take_while(|c| is_ident(*c)).count();
+        if &ident[..len] != name {
+            continue;
+        }
+        let after = ident[len..].trim_start();
+        if after.starts_with(';') {
+            return Some(text.len() - after.len() + 1);
+        }
+    }
+    None
+}
+
 /// The samplers a call passes for `f`'s `sampler2D` parameters, in order.
 fn chosen_samplers(f: &SamplerFn, args: &[&str]) -> Vec<String> {
     f.samplers
@@ -278,15 +307,26 @@ fn specialize_sampler_params(text: &str) -> String {
         // each definition becomes its copies). A call nested in another's arguments starts
         // after it, so it is rewritten first, and the call around it is read again from the
         // text as it is then.
+        let first_call = call_starts.iter().copied().min().unwrap_or(usize::MAX);
         let mut edits: Vec<(usize, Option<(usize, String)>)> =
             call_starts.into_iter().map(|at| (at, None)).collect();
         for g in functions.iter().filter(|g| g.name == f.name) {
-            let with = if g.body.is_some() {
-                copies_of(g)
-            } else {
-                String::new()
-            };
-            edits.push((g.start, Some((g.end, with))));
+            // A copy reads its samplers by name, so it goes after their declarations: vanilla's
+            // `sample_lightmap.glsl` is included above `uniform sampler2D Sampler2;`.
+            let declared = variants
+                .iter()
+                .flatten()
+                .filter_map(|s| sampler_declaration_end(&text, s))
+                .max()
+                .filter(|&end| end > g.start && end <= first_call);
+            match (&g.body, declared) {
+                (Some(_), Some(end)) => {
+                    edits.push((g.start, Some((g.end, String::new()))));
+                    edits.push((end, Some((end, format!("\n{}", copies_of(g))))));
+                }
+                (Some(_), None) => edits.push((g.start, Some((g.end, copies_of(g))))),
+                (None, _) => edits.push((g.start, Some((g.end, String::new())))),
+            }
         }
         edits.sort_by_key(|(start, _)| std::cmp::Reverse(*start));
         for (start, edit) in edits {
@@ -460,6 +500,28 @@ mod tests {
             out.contains("vec4 b = tap_hz_Sampler0(vec3(uv, 2.0));"),
             "{out}"
         );
+    }
+
+    /// A copy reads its samplers by name, so it goes after a sampler declared below the helper
+    /// (vanilla's world `text.vsh` includes `sample_lightmap.glsl` above `Sampler2`).
+    #[test]
+    fn a_copy_goes_after_its_samplers_declaration() {
+        let text = "vec4 tap(sampler2D s, vec2 uv) { return texture(s, uv); }\n\
+            uniform sampler2D Sampler2;\n\
+            void main() { vec4 c = tap(Sampler2, vec2(0.5)); }\n";
+        let out = specialize_sampler_params(text);
+        let declared = out
+            .find("uniform sampler2D Sampler2;")
+            .expect("declaration kept");
+        let copy = out
+            .find("vec4 tap_hz_Sampler2(vec2 uv)")
+            .expect("copy written");
+        let call = out
+            .find("tap_hz_Sampler2(vec2(0.5))")
+            .expect("call rewritten");
+        assert!(declared < copy && copy < call, "{out}");
+        assert_eq!(out.matches("tap_hz_Sampler2(vec2 uv)").count(), 1, "{out}");
+        assert!(!out.contains("tap(sampler2D"), "{out}");
     }
 
     #[test]
