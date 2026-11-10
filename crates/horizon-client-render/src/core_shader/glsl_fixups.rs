@@ -198,7 +198,9 @@ fn sampler_declaration_end(text: &str, name: &str) -> Option<usize> {
             continue;
         }
         let after = ident[len..].trim_start();
-        if after.starts_with(';') {
+        // A declaration at the shader's top level, not one inside a function's braces.
+        let depth = text[..at].matches('{').count() as i64 - text[..at].matches('}').count() as i64;
+        if after.starts_with(';') && depth == 0 {
             return Some(text.len() - after.len() + 1);
         }
     }
@@ -274,10 +276,77 @@ fn specialize_sampler_params(text: &str) -> String {
         if !followable || !same_places {
             break;
         }
+        // A body may call another overload of itself with its own sampler (vanilla's
+        // `sampleNearest` calls the six-argument one): once its sampler parameters read a
+        // sampler, those calls name that copy too, and their sets join the variants.
+        let rewrite_own_calls = |body: &str| -> Option<(String, Vec<Vec<String>>)> {
+            let mut body = body.to_owned();
+            let mut found = Vec::new();
+            let mut starts: Vec<usize> = self::calls(&body, &f.name, &[])
+                .iter()
+                .map(|c| c.0)
+                .collect();
+            starts.sort_unstable_by(|a, b| b.cmp(a));
+            for start in starts {
+                let (end, chosen, with) = {
+                    let (_, end, args) = self::calls(&body, &f.name, &[])
+                        .into_iter()
+                        .find(|c| c.0 == start)?;
+                    let chosen = chosen_samplers(f, &args);
+                    let rest: Vec<&str> = args
+                        .iter()
+                        .enumerate()
+                        .filter(|(n, _)| !f.samplers.iter().any(|(s, _)| s == n))
+                        .map(|(_, a)| a.trim())
+                        .collect();
+                    let with = format!("{}_hz_{}({})", f.name, chosen.join("_"), rest.join(", "));
+                    (end, chosen, with)
+                };
+                if chosen.len() != f.samplers.len()
+                    || chosen
+                        .iter()
+                        .any(|a| a.is_empty() || !a.chars().all(is_ident))
+                {
+                    return None;
+                }
+                found.push(chosen);
+                body.replace_range(start..end, &with);
+            }
+            Some((body, found))
+        };
+        let specialize = |g: &SamplerFn, chosen: &[String]| {
+            let mut body = g.body.as_deref().unwrap_or_default().to_owned();
+            for ((_, param), sampler) in g.samplers.iter().zip(chosen) {
+                body = replace_ident(&body, param, sampler);
+            }
+            rewrite_own_calls(&body)
+        };
+        let same: Vec<&SamplerFn> = functions.iter().filter(|g| g.name == f.name).collect();
+        let mut next = 0;
+        while followable && next < variants.len() {
+            let chosen = variants[next].clone();
+            for g in same.iter().filter(|g| g.body.is_some()) {
+                match specialize(g, &chosen) {
+                    Some((_, inner)) => {
+                        for v in inner {
+                            if !variants.contains(&v) {
+                                variants.push(v);
+                            }
+                        }
+                    }
+                    None => followable = false,
+                }
+            }
+            next += 1;
+            followable &= variants.len() <= 64;
+        }
+        if !followable {
+            break;
+        }
         // One copy of an overload per set of samplers its callers pass; the copies keep the
-        // overload's other parameters, so the shader's compiler still tells them apart.
-        let copies_of = |g: &SamplerFn| -> String {
-            let body = g.body.as_deref().unwrap_or_default();
+        // overload's other parameters, so the shader's compiler still tells them apart. A
+        // prototype becomes the copies' prototypes, for a call above the definition.
+        let signature = |g: &SamplerFn, chosen: &[String]| {
             let params: Vec<&str> = g
                 .params
                 .iter()
@@ -285,50 +354,70 @@ fn specialize_sampler_params(text: &str) -> String {
                 .filter(|(n, _)| !g.samplers.iter().any(|(s, _)| s == n))
                 .map(|(_, p)| p.as_str())
                 .collect();
+            format!(
+                "{} {}_hz_{}({})",
+                g.return_type,
+                g.name,
+                chosen.join("_"),
+                params.join(", ")
+            )
+        };
+        let copies_of = |g: &SamplerFn| -> String {
             variants
                 .iter()
-                .map(|chosen| {
-                    let mut body = body.to_owned();
-                    for ((_, param), sampler) in g.samplers.iter().zip(chosen) {
-                        body = replace_ident(&body, param, sampler);
+                .map(|chosen| match &g.body {
+                    Some(_) => {
+                        let body = specialize(g, chosen).map(|(b, _)| b).unwrap_or_default();
+                        format!("{} {body}\n", signature(g, chosen))
                     }
-                    format!(
-                        "{} {}_hz_{}({}) {}\n",
-                        g.return_type,
-                        g.name,
-                        chosen.join("_"),
-                        params.join(", "),
-                        body
-                    )
+                    None => format!("{};\n", signature(g, chosen)),
                 })
                 .collect()
         };
-        // Rebuild from the back: the calls, then the function's own spans (its prototypes go,
-        // each definition becomes its copies). A call nested in another's arguments starts
-        // after it, so it is rewritten first, and the call around it is read again from the
-        // text as it is then.
+        // Rebuild from the back: the calls, then the function's own spans (each prototype and
+        // definition becomes its copies). A call nested in another's arguments starts after it,
+        // so it is rewritten first, and the call around it is read again from the text as it is
+        // then. A copy reads its samplers by name, so definitions above their samplers'
+        // declaration (vanilla's `sample_lightmap.glsl` is included above `uniform sampler2D
+        // Sampler2;`) move after it, together and in their order, as long as no call comes first.
         let first_call = call_starts.iter().copied().min().unwrap_or(usize::MAX);
+        let declared = variants
+            .iter()
+            .flatten()
+            .filter_map(|s| sampler_declaration_end(&text, s))
+            .max();
         let mut edits: Vec<(usize, Option<(usize, String)>)> =
             call_starts.into_iter().map(|at| (at, None)).collect();
-        for g in functions.iter().filter(|g| g.name == f.name) {
-            // A copy reads its samplers by name, so it goes after their declarations: vanilla's
-            // `sample_lightmap.glsl` is included above `uniform sampler2D Sampler2;`.
-            let declared = variants
-                .iter()
-                .flatten()
-                .filter_map(|s| sampler_declaration_end(&text, s))
-                .max()
-                .filter(|&end| end > g.start && end <= first_call);
-            match (&g.body, declared) {
+        let (mut moved, mut move_to) = (String::new(), None);
+        for g in &same {
+            match (
+                &g.body,
+                declared.filter(|&end| end > g.start && end <= first_call),
+            ) {
                 (Some(_), Some(end)) => {
                     edits.push((g.start, Some((g.end, String::new()))));
-                    edits.push((end, Some((end, format!("\n{}", copies_of(g))))));
+                    moved.push_str(&copies_of(g));
+                    move_to = Some(end);
                 }
-                (Some(_), None) => edits.push((g.start, Some((g.end, copies_of(g))))),
-                (None, _) => edits.push((g.start, Some((g.end, String::new())))),
+                _ => edits.push((g.start, Some((g.end, copies_of(g))))),
             }
         }
+        if let Some(end) = move_to {
+            edits.push((end, Some((end, format!("\n{moved}")))));
+        }
+        // Pack text is untrusted: edits that overlap, or offsets off the text, leave the shader
+        // as it is (the translator then refuses it) instead of writing it wrong or panicking.
+        let mut spans: Vec<(usize, usize)> = edits
+            .iter()
+            .filter_map(|(s, e)| e.as_ref().map(|(end, _)| (*s, *end)))
+            .collect();
+        spans.sort_unstable();
+        if spans.windows(2).any(|w| w[1].0 < w[0].1) {
+            break;
+        }
+        let before = text.clone();
         edits.sort_by_key(|(start, _)| std::cmp::Reverse(*start));
+        let mut sound = true;
         for (start, edit) in edits {
             let (end, with) = match edit {
                 Some(span) => span,
@@ -349,7 +438,15 @@ fn specialize_sampler_params(text: &str) -> String {
                     (end, format!("{copy}({})", rest.join(", ")))
                 }
             };
+            if start > end || text.get(start..end).is_none() {
+                sound = false;
+                break;
+            }
             text.replace_range(start..end, &with);
+        }
+        if !sound {
+            text = before;
+            break;
         }
     }
     text
@@ -522,6 +619,65 @@ mod tests {
         assert!(declared < copy && copy < call, "{out}");
         assert_eq!(out.matches("tap_hz_Sampler2(vec2 uv)").count(), 1, "{out}");
         assert!(!out.contains("tap(sampler2D"), "{out}");
+    }
+
+    /// A pack's text is untrusted: a sampler declared inside the helper itself (and text that
+    /// isn't ASCII) must leave a shader the translator can refuse, never a panic.
+    #[test]
+    fn a_sampler_declared_inside_the_helper_never_panics() {
+        let text = "vec4 tap(sampler2D s, vec2 uv) { é uniform sampler2D Sampler0; x return texture(s, uv); ééé }\n\
+            void main() { fragColor = tap(Sampler0, vec2(0.0)); }\n";
+        let out = specialize_sampler_params(text);
+        assert!(out.is_char_boundary(out.len()));
+        assert!(out.contains("tap_hz_Sampler0(vec2(0.0))"), "{out}");
+    }
+
+    /// Vanilla's `texture_sampling.glsl` shape: one overload calls the other with its own
+    /// sampler. That call is rewritten too, and both copies come after the sampler's declaration
+    /// in their own order, the called one first.
+    #[test]
+    fn an_overload_passing_its_sampler_to_another_is_followed() {
+        let text = "vec4 sampleNearest(sampler2D source, vec2 uv, vec2 pixelSize, vec2 du, vec2 dv, vec2 texelSize) { return texture(source, uv + du + dv); }\n\
+            vec4 sampleNearest(sampler2D source, vec2 uv, vec2 pixelSize) { return sampleNearest(source, uv, pixelSize, dFdx(uv), dFdy(uv), pixelSize); }\n\
+            uniform sampler2D Sampler0;\n\
+            void main() { vec4 c = sampleNearest(Sampler0, uv, px); }\n";
+        let out = specialize_sampler_params(text);
+        assert!(
+            !out.contains("sampleNearest(") && !out.contains("sampler2D source"),
+            "{out}"
+        );
+        let declared = out
+            .find("uniform sampler2D Sampler0;")
+            .expect("declaration");
+        let six = out
+            .find("vec4 sampleNearest_hz_Sampler0(vec2 uv, vec2 pixelSize, vec2 du, vec2 dv, vec2 texelSize)")
+            .expect("six-argument copy");
+        let three = out
+            .find("vec4 sampleNearest_hz_Sampler0(vec2 uv, vec2 pixelSize) { return sampleNearest_hz_Sampler0(uv, pixelSize, dFdx(uv), dFdy(uv), pixelSize); }")
+            .expect("three-argument copy calling the six-argument one");
+        let call = out
+            .find("vec4 c = sampleNearest_hz_Sampler0(uv, px);")
+            .expect("call");
+        assert!(declared < six && six < three && three < call, "{out}");
+    }
+
+    /// A prototype above `main` with the definition below it becomes the copies' prototypes, so
+    /// the call still has a declaration above it.
+    #[test]
+    fn a_prototype_becomes_the_copies_prototypes() {
+        let text = "uniform sampler2D Sampler0;\n\
+            vec4 tap(sampler2D s, vec2 uv);\n\
+            void main() { vec4 c = tap(Sampler0, uv); }\n\
+            vec4 tap(sampler2D s, vec2 uv) { return texture(s, uv); }\n";
+        let out = specialize_sampler_params(text);
+        let prototype = out
+            .find("vec4 tap_hz_Sampler0(vec2 uv);")
+            .expect("prototype copy");
+        let call = out.find("tap_hz_Sampler0(uv); }").expect("call");
+        let definition = out
+            .find("vec4 tap_hz_Sampler0(vec2 uv) { return texture(Sampler0, uv); }")
+            .expect("definition copy");
+        assert!(prototype < call && call < definition, "{out}");
     }
 
     #[test]
