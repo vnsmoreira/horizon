@@ -234,43 +234,55 @@ fn specialize_sampler_params(text: &str) -> String {
                 variants.push(chosen);
             }
         }
-        if !followable {
+        // Overloads (`tap(sampler2D, vec2)` and `tap(sampler2D, vec3)`) each keep their own
+        // body; a call picks its samplers by position, so they must sit at the same places.
+        let same_places = functions.iter().filter(|g| g.name == f.name).all(|g| {
+            g.samplers
+                .iter()
+                .map(|s| s.0)
+                .eq(f.samplers.iter().map(|s| s.0))
+        });
+        if !followable || !same_places {
             break;
         }
-        let body = f.body.as_deref().unwrap_or_default();
-        let params: Vec<&str> = f
-            .params
-            .iter()
-            .enumerate()
-            .filter(|(n, _)| !f.samplers.iter().any(|(s, _)| s == n))
-            .map(|(_, p)| p.as_str())
-            .collect();
-        let copies: String = variants
-            .iter()
-            .map(|chosen| {
-                let mut body = body.to_owned();
-                for ((_, param), sampler) in f.samplers.iter().zip(chosen) {
-                    body = replace_ident(&body, param, sampler);
-                }
-                format!(
-                    "{} {}_hz_{}({}) {}\n",
-                    f.return_type,
-                    f.name,
-                    chosen.join("_"),
-                    params.join(", "),
-                    body
-                )
-            })
-            .collect();
+        // One copy of an overload per set of samplers its callers pass; the copies keep the
+        // overload's other parameters, so the shader's compiler still tells them apart.
+        let copies_of = |g: &SamplerFn| -> String {
+            let body = g.body.as_deref().unwrap_or_default();
+            let params: Vec<&str> = g
+                .params
+                .iter()
+                .enumerate()
+                .filter(|(n, _)| !g.samplers.iter().any(|(s, _)| s == n))
+                .map(|(_, p)| p.as_str())
+                .collect();
+            variants
+                .iter()
+                .map(|chosen| {
+                    let mut body = body.to_owned();
+                    for ((_, param), sampler) in g.samplers.iter().zip(chosen) {
+                        body = replace_ident(&body, param, sampler);
+                    }
+                    format!(
+                        "{} {}_hz_{}({}) {}\n",
+                        g.return_type,
+                        g.name,
+                        chosen.join("_"),
+                        params.join(", "),
+                        body
+                    )
+                })
+                .collect()
+        };
         // Rebuild from the back: the calls, then the function's own spans (its prototypes go,
-        // its definition becomes the copies). A call nested in another's arguments starts
+        // each definition becomes its copies). A call nested in another's arguments starts
         // after it, so it is rewritten first, and the call around it is read again from the
         // text as it is then.
         let mut edits: Vec<(usize, Option<(usize, String)>)> =
             call_starts.into_iter().map(|at| (at, None)).collect();
         for g in functions.iter().filter(|g| g.name == f.name) {
             let with = if g.body.is_some() {
-                copies.clone()
+                copies_of(g)
             } else {
                 String::new()
             };
@@ -424,6 +436,30 @@ mod tests {
         );
         assert!(out.contains("vec2 tap_hz_Sampler0(vec2 uv) { return texture(Sampler0, uv).xy; }"));
         assert!(out.contains("vec2 tap_hz_Sampler1(vec2 uv) { return texture(Sampler1, uv).xy; }"));
+    }
+
+    /// Overloads that differ past their sampler each keep their own body in their copies.
+    #[test]
+    fn overloads_with_a_sampler_each_keep_their_own_body() {
+        let text = "vec4 tap(sampler2D s, vec2 p) { return texture(s, p); }\n\
+            vec4 tap(sampler2D s, vec3 p) { return texture(s, p.xy / p.z); }\n\
+            void main() { vec4 a = tap(Sampler0, uv); vec4 b = tap(Sampler0, vec3(uv, 2.0)); }\n";
+        let out = specialize_sampler_params(text);
+        assert!(!out.contains("sampler2D"), "{out}");
+        assert!(
+            out.contains("vec4 tap_hz_Sampler0(vec2 p) { return texture(Sampler0, p); }"),
+            "{out}"
+        );
+        assert!(
+            out.contains("vec4 tap_hz_Sampler0(vec3 p) { return texture(Sampler0, p.xy / p.z); }"),
+            "{out}"
+        );
+        assert_eq!(out.matches("vec4 tap_hz_Sampler0(").count(), 2, "{out}");
+        assert!(out.contains("vec4 a = tap_hz_Sampler0(uv);"), "{out}");
+        assert!(
+            out.contains("vec4 b = tap_hz_Sampler0(vec3(uv, 2.0));"),
+            "{out}"
+        );
     }
 
     #[test]
