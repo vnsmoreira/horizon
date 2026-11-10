@@ -176,6 +176,14 @@ fn replace_ident(text: &str, from: &str, to: &str) -> String {
     super::replace_ident(text, from, to)
 }
 
+/// The samplers a call passes for `f`'s `sampler2D` parameters, in order.
+fn chosen_samplers(f: &SamplerFn, args: &[&str]) -> Vec<String> {
+    f.samplers
+        .iter()
+        .filter_map(|(n, _)| args.get(*n).map(|a| a.trim().to_owned()))
+        .collect()
+}
+
 /// One pass per function with `sampler2D` parameters, until none is left or one can't be
 /// followed (a caller passes something that is no sampler's name).
 fn specialize_sampler_params(text: &str) -> String {
@@ -209,14 +217,10 @@ fn specialize_sampler_params(text: &str) -> String {
         // Each call's samplers must be plain names (a global sampler, or a parameter of a
         // function to be copied in a later pass).
         let mut variants: Vec<Vec<String>> = Vec::new();
-        let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+        let mut call_starts: Vec<usize> = Vec::new();
         let mut followable = true;
-        for (at, end, args) in &calls {
-            let chosen: Vec<String> = f
-                .samplers
-                .iter()
-                .filter_map(|(n, _)| args.get(*n).map(|a| a.trim().to_owned()))
-                .collect();
+        for (at, _, args) in &calls {
+            let chosen = chosen_samplers(f, args);
             if chosen.len() != f.samplers.len()
                 || chosen
                     .iter()
@@ -225,14 +229,7 @@ fn specialize_sampler_params(text: &str) -> String {
                 followable = false;
                 break;
             }
-            let copy = format!("{}_hz_{}", f.name, chosen.join("_"));
-            let rest: Vec<&str> = args
-                .iter()
-                .enumerate()
-                .filter(|(n, _)| !f.samplers.iter().any(|(s, _)| s == n))
-                .map(|(_, a)| a.trim())
-                .collect();
-            replacements.push((*at, *end, format!("{copy}({})", rest.join(", "))));
+            call_starts.push(*at);
             if !variants.contains(&chosen) {
                 variants.push(chosen);
             }
@@ -266,18 +263,38 @@ fn specialize_sampler_params(text: &str) -> String {
             })
             .collect();
         // Rebuild from the back: the calls, then the function's own spans (its prototypes go,
-        // its definition becomes the copies).
-        let mut edits: Vec<(usize, usize, String)> = replacements;
+        // its definition becomes the copies). A call nested in another's arguments starts
+        // after it, so it is rewritten first, and the call around it is read again from the
+        // text as it is then.
+        let mut edits: Vec<(usize, Option<(usize, String)>)> =
+            call_starts.into_iter().map(|at| (at, None)).collect();
         for g in functions.iter().filter(|g| g.name == f.name) {
             let with = if g.body.is_some() {
                 copies.clone()
             } else {
                 String::new()
             };
-            edits.push((g.start, g.end, with));
+            edits.push((g.start, Some((g.end, with))));
         }
-        edits.sort_by_key(|(start, ..)| std::cmp::Reverse(*start));
-        for (start, end, with) in edits {
+        edits.sort_by_key(|(start, _)| std::cmp::Reverse(*start));
+        for (start, edit) in edits {
+            let (end, with) = match edit {
+                Some(span) => span,
+                None => {
+                    let found = self::calls(&text, &f.name, &[]).into_iter().find(|c| c.0 == start);
+                    let Some((_, end, args)) = found else {
+                        continue;
+                    };
+                    let rest: Vec<&str> = args
+                        .iter()
+                        .enumerate()
+                        .filter(|(n, _)| !f.samplers.iter().any(|(s, _)| s == n))
+                        .map(|(_, a)| a.trim())
+                        .collect();
+                    let copy = format!("{}_hz_{}", f.name, chosen_samplers(f, &args).join("_"));
+                    (end, format!("{copy}({})", rest.join(", ")))
+                }
+            };
             text.replace_range(start..end, &with);
         }
     }
@@ -384,6 +401,21 @@ mod tests {
         assert!(!out.contains("sampler2D"), "{out}");
         assert!(out.contains("outer_hz_Sampler2(uv)"), "{out}");
         assert!(out.contains("inner_hz_Sampler2(uv)"), "{out}");
+    }
+
+    /// A call in another call's arguments is rewritten before the call around it, which is
+    /// then read again: neither edit lands on the other's old text.
+    #[test]
+    fn a_call_nested_in_another_calls_arguments_is_rewritten_inside_out() {
+        let text = "vec2 tap(sampler2D s, vec2 uv) { return texture(s, uv).xy; }\n\
+            void main() { vec2 a = tap(Sampler0, tap(Sampler0, uv));\n\
+            vec2 b = tap(   Sampler1   ,   tap(  Sampler0  ,     uv      )   ); }\n";
+        let out = specialize_sampler_params(text);
+        assert!(!out.contains("sampler2D") && !out.contains("tap("), "{out}");
+        assert!(out.contains("vec2 a = tap_hz_Sampler0(tap_hz_Sampler0(uv));"), "{out}");
+        assert!(out.contains("vec2 b = tap_hz_Sampler1(tap_hz_Sampler0(uv)); }"), "{out}");
+        assert!(out.contains("vec2 tap_hz_Sampler0(vec2 uv) { return texture(Sampler0, uv).xy; }"));
+        assert!(out.contains("vec2 tap_hz_Sampler1(vec2 uv) { return texture(Sampler1, uv).xy; }"));
     }
 
     #[test]
