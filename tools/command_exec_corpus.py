@@ -7583,21 +7583,20 @@ def dispensed_item_escape():
                        f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0} {z0 + 15} air', f'/forceload remove {x0} {z0}')
 
 
-def comparator_setblock_output():
-    """#13870: `BlockInput.place` loads a comparator's tag (`ComparatorBlockEntity.loadAdditional`:
-    `getIntOr("OutputSignal", 0)`), as `/data merge block` does."""
-    x0, y0, z0 = 4096 - 320, 260, 3584
-    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]},
-           cmd('/tick freeze', False),
-           cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} stone', False)]
-    for n, data in enumerate(('{OutputSignal:20}', '{OutputSignal:-1}', '{}', '{OutputSignal:7}'), 1):
-        x = x0 + 2 * n
-        ops += [cmd(f'/setblock {x} {y0} {z0 + 8} comparator{data}', expect_result=1),
-                cmd(f'/data get block {x} {y0} {z0 + 8} OutputSignal')]
-    # A second /setblock over the same comparator loads the tag again.
-    ops += [cmd(f'/setblock {x0 + 8} {y0} {z0 + 8} comparator{{OutputSignal:3}}'),
-            cmd(f'/data get block {x0 + 8} {y0} {z0 + 8} OutputSignal')]
-    return ops + setup('/tick unfreeze', f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0} {z0 + 15} air',
+def raw_entity_flags():
+    """#13853: `Entity.load` reads the flags with `getBooleanOr` and `saveWithoutId` writes each back as `1b` only
+    when true: a leash knot's or a marker's raw save normalizes them too."""
+    x0, y0, z0 = 4096 - 256, 260, 3584
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]}]
+    subjects = [('leash_knot', 'NoGravity:-1b'), ('leash_knot', 'NoGravity:0b,Silent:3b'),
+                ('marker', 'Glowing:-1b,NoGravity:2b,data:{a:1}'), ('marker', 'Silent:0b')]
+    for n, (kind, fields) in enumerate(subjects, 1):
+        uuid = f'000037e8-0000-0000-0000-{n:04x}00000001'
+        ops += [cmd(f'/summon {kind} {x0 + 3 * n}.5 {y0}.5 {z0 + 8}.5 {{UUID:[I;14312,0,{n},1],{fields}}}',
+                    expect_result=1)]
+        for key in ('NoGravity', 'Silent', 'Glowing'):
+            ops.append(cmd(f'/data get entity {uuid} {key}'))
+    return ops + setup(f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
                        f'/forceload remove {x0} {z0}')
 
 def groups():
@@ -7796,7 +7795,7 @@ def groups():
         ('primed tnt fall', primed_tnt_fall()),
         ('dispensed item escape', dispensed_item_escape()),
         ('command block last output', command_block_last_output()),
-        ('comparator setblock output', comparator_setblock_output()),
+        ('raw entity flags', raw_entity_flags()),
         ('glide fall accumulation', glide_fall_accumulation()),
         ('living short timers', living_short_timers()),
         ('projectile fall distance', projectile_fall_distance()),
