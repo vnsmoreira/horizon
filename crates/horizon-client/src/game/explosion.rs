@@ -834,10 +834,16 @@ impl Game<'_> {
         }
         self.crystal_blast_player()
     }
+    /// `source.getEntity() instanceof Mob` for the blast going off now: a
+    /// causing mob, not a player whose primed TNT this is (`blast_attacker`
+    /// names that player first).
+    fn blast_by_mob(&self) -> bool {
+        self.combat.blast_owner.is_none() && self.blast_attacker().is_some()
+    }
     /// `blast_spares_decorations` for the blast going off now: its causing
-    /// mob (`blast_attacker`) is the source's entity.
+    /// mob (`blast_by_mob`) is the source's entity.
     pub(super) fn blast_spares_decorations(&self, interaction: BlockInteraction) -> bool {
-        let by_mob = self.blast_attacker().is_some();
+        let by_mob = self.blast_by_mob();
         blast_spares_decorations(
             self.ui.rules.bool("mob_griefing"),
             interaction,
@@ -865,7 +871,7 @@ impl Game<'_> {
         interaction: BlockInteraction,
     ) {
         // An armour stand is no `BlockAttachedEntity`: a source in water does not spare it.
-        let by_mob = self.blast_attacker().is_some();
+        let by_mob = self.blast_by_mob();
         let spares_stands = blast_spares_decorations(
             self.ui.rules.bool("mob_griefing"),
             interaction,

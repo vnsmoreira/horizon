@@ -7583,31 +7583,34 @@ def dispensed_item_escape():
                        f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0} {z0 + 15} air', f'/forceload remove {x0} {z0}')
 
 
-def explosion_creaking_heart_experience():
-    """#11330: `CreakingHeartBlock.onExplosionHit` awards a natural heart's experience (`tryAwardExperience`)
-    when the blast's indirect source is a player (a primed TNT's `owner`); an ownerless blast awards none. The
-    amount is random (20 to 24), so only whether orbs came out is compared. A creative owner gets none
-    (`preventsBlockDrops`), so the player is in survival for the owned blasts, then back in creative."""
+def explosion_player_decorations():
+    """#11330: with `mob_griefing` off, `BlockAttachedEntity.hurtServer` and `ArmorStand.hurtServer` refuse a
+    blast whose causing entity is a mob, but a player's primed TNT (its `owner`) is no mob: it still breaks an
+    item frame and an armor stand, as an ownerless TNT does."""
     # Entities tick once the forced chunk's 2-column neighbourhood is loaded (ChunkMap.prepareEntityTickingChunk).
-    x0, y0, z0 = 4096 - 416, 260, 3584
+    x0, y0, z0 = 4096 - 448, 260, 3584
     ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks',
             'chunks': [[(x0 >> 4) + i, (z0 >> 4) + k] for i in range(-2, 3) for k in range(-2, 3)]},
-           cmd('/tick freeze', False)]
+           cmd('/gamerule mob_griefing false', False), cmd('/tick freeze', False)]
     near = f'x={x0},y={y0 - 4},z={z0},dx=16,dy=16,dz=16'
-    for owned, mode in ((False, 'survival'), (True, 'creative'), (True, 'survival')):
+    for owned in (False, True):
         ops += [cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 6} {z0 + 15} air', False),
                 cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} bedrock', False),
-                cmd(f'/setblock {x0 + 8} {y0} {z0 + 8} creaking_heart[natural=true]', expect_result=1),
-                cmd(f'/summon tnt {x0 + 8}.5 {y0 + 1} {z0 + 8}.5 {{fuse:1,Tags:["heart_tnt"]}}', expect_result=1)]
+                cmd(f'/fill {x0 + 6} {y0} {z0 + 7} {x0 + 10} {y0 + 2} {z0 + 7} bedrock', False),
+                cmd(f'/summon item_frame {x0 + 8}.5 {y0 + 1}.5 {z0 + 8}.03125 {{Facing:3b,Tags:["blast_deco"]}}',
+                    expect_result=1),
+                cmd(f'/summon armor_stand {x0 + 9}.5 {y0} {z0 + 9}.5 {{NoGravity:1b,Tags:["blast_deco"]}}',
+                    expect_result=1),
+                cmd(f'/summon tnt {x0 + 8}.5 {y0} {z0 + 10}.5 {{fuse:1,Tags:["deco_tnt"]}}', expect_result=1)]
         if owned:
-            ops.append(cmd('/data modify entity @e[type=tnt,tag=heart_tnt,limit=1] owner set from entity @p UUID'))
-        ops.append(cmd(f'/gamemode {mode} @p', False))
-        ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 2}, cmd('/tick freeze', False),
-                cmd(f'/execute if block {x0 + 8} {y0} {z0 + 8} air', expect_result=1),
-                cmd(f'/execute if entity @e[type=experience_orb,{near}]', comparison='positive_result'),
+            ops.append(cmd('/data modify entity @e[type=tnt,tag=deco_tnt,limit=1] owner set from entity @p UUID'))
+        ops += [cmd(f'/execute if entity @e[tag=blast_deco,{near}]'),
+                cmd('/tick unfreeze', False), {'op': 'tick', 'n': 2}, cmd('/tick freeze', False),
+                cmd(f'/execute if entity @e[type=item_frame,tag=blast_deco,{near}]'),
+                cmd(f'/execute if entity @e[type=armor_stand,tag=blast_deco,{near}]'),
                 cmd(f'/kill @e[type=!player,{near}]', False)]
-    return ops + setup('/gamemode creative @p', '/tick unfreeze', f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 6} {z0 + 15} air',
-                       f'/forceload remove {x0} {z0}')
+    return ops + setup('/gamerule mob_griefing true', '/tick unfreeze',
+                       f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 6} {z0 + 15} air', f'/forceload remove {x0} {z0}')
 
 def groups():
     try:
@@ -7805,7 +7808,7 @@ def groups():
         ('primed tnt fall', primed_tnt_fall()),
         ('dispensed item escape', dispensed_item_escape()),
         ('command block last output', command_block_last_output()),
-        ('explosion creaking heart experience', explosion_creaking_heart_experience()),
+        ('explosion player decorations', explosion_player_decorations()),
         ('glide fall accumulation', glide_fall_accumulation()),
         ('living short timers', living_short_timers()),
         ('projectile fall distance', projectile_fall_distance()),
