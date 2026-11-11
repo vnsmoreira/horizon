@@ -7583,21 +7583,21 @@ def dispensed_item_escape():
                        f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0} {z0 + 15} air', f'/forceload remove {x0} {z0}')
 
 
-def vex_no_gravity():
-    """#13849: `Vex.tick` calls `setNoGravity(true)` on every tick, AI or not, so a vex that ticked once saves
-    `NoGravity: 1b`; before its first tick it saves none."""
-    # Entities tick once the forced chunk's 2-column neighbourhood is loaded (ChunkMap.prepareEntityTickingChunk).
-    x0, y0, z0 = 4096 - 192, 270, 3584
-    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks',
-            'chunks': [[(x0 >> 4) + i, (z0 >> 4) + k] for i in range(-2, 3) for k in range(-2, 3)]},
-           cmd('/tick freeze', False)]
-    for n, fields in enumerate(['NoAI:1b,PersistenceRequired:1b', 'NoAI:1b,PersistenceRequired:1b,NoGravity:0b'], 1):
-        ops += [cmd(f'/summon vex {x0 + 4 * n}.5 {y0} {z0 + 8}.5 {{UUID:[I;14200,0,{n},1],{fields}}}', expect_result=1),
-                cmd(f'/data get entity 00003778-0000-0000-0000-{n:04x}00000001 NoGravity')]
-    ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 1}, cmd('/tick freeze', False)]
-    for n in (1, 2):
-        ops.append(cmd(f'/data get entity 00003778-0000-0000-0000-{n:04x}00000001 NoGravity'))
-    return ops + setup('/tick unfreeze', f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
+def comparator_setblock_output():
+    """#13870: `BlockInput.place` loads a comparator's tag (`ComparatorBlockEntity.loadAdditional`:
+    `getIntOr("OutputSignal", 0)`), as `/data merge block` does."""
+    x0, y0, z0 = 4096 - 320, 260, 3584
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]},
+           cmd('/tick freeze', False),
+           cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} stone', False)]
+    for n, data in enumerate(('{OutputSignal:20}', '{OutputSignal:-1}', '{}', '{OutputSignal:7}'), 1):
+        x = x0 + 2 * n
+        ops += [cmd(f'/setblock {x} {y0} {z0 + 8} comparator{data}', expect_result=1),
+                cmd(f'/data get block {x} {y0} {z0 + 8} OutputSignal')]
+    # A second /setblock over the same comparator loads the tag again.
+    ops += [cmd(f'/setblock {x0 + 8} {y0} {z0 + 8} comparator{{OutputSignal:3}}'),
+            cmd(f'/data get block {x0 + 8} {y0} {z0 + 8} OutputSignal')]
+    return ops + setup('/tick unfreeze', f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0} {z0 + 15} air',
                        f'/forceload remove {x0} {z0}')
 
 def groups():
@@ -7796,7 +7796,7 @@ def groups():
         ('primed tnt fall', primed_tnt_fall()),
         ('dispensed item escape', dispensed_item_escape()),
         ('command block last output', command_block_last_output()),
-        ('vex no gravity', vex_no_gravity()),
+        ('comparator setblock output', comparator_setblock_output()),
         ('glide fall accumulation', glide_fall_accumulation()),
         ('living short timers', living_short_timers()),
         ('projectile fall distance', projectile_fall_distance()),
