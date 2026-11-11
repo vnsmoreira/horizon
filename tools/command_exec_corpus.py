@@ -7583,20 +7583,23 @@ def dispensed_item_escape():
                        f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0} {z0 + 15} air', f'/forceload remove {x0} {z0}')
 
 
-def crafter_triggered_int():
-    """#13851: `CrafterBlockEntity` keeps `triggered` as the int it read (`containerData` slot 9) and writes it back;
-    `isTriggered` is only `== 1`."""
-    x0, y0, z0 = 4096 - 224, 260, 3584
+def item_frame_rotation():
+    """#13848: `ItemFrame.setDirection` turns a frame with its facing (`yRot` from the 2D data value on a wall,
+    `xRot` 90 or -90 on a floor or ceiling), and `Entity.saveWithoutId` writes it as `Rotation`."""
+    x0, y0, z0 = 4096 - 160, 260, 3648
     ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]},
-           cmd('/tick freeze', False)]
-    for n, value in enumerate(('-1', '0', '1', '5'), 1):
+           cmd(f'/fill {x0} {y0} {z0} {x0 + 15} {y0 + 3} {z0 + 15} stone', False)]
+    frames = [('glow_item_frame', ''), ('item_frame', ',Facing:1b'), ('item_frame', ',Facing:2b'),
+              ('item_frame', ',Facing:3b'), ('glow_item_frame', ',Facing:4b'), ('item_frame', ',Facing:5b')]
+    for n, (kind, facing) in enumerate(frames, 1):
         x = x0 + 2 * n
-        ops += [cmd(f'/setblock {x} {y0} {z0 + 8} crafter{{triggered:{value}}}', expect_result=1),
-                cmd(f'/data get block {x} {y0} {z0 + 8} triggered')]
-    ops.append(cmd(f'/data merge block {x0 + 2} {y0} {z0 + 8} {{triggered:7}}'))
-    ops.append(cmd(f'/data get block {x0 + 2} {y0} {z0 + 8} triggered'))
-    return ops + setup('/tick unfreeze', f'/fill {x0} {y0} {z0} {x0 + 15} {y0} {z0 + 15} air',
-                       f'/forceload remove {x0} {z0}')
+        ops += [cmd(f'/setblock {x} {y0 + 5} {z0 + 8} air', False),
+                cmd(f'/summon {kind} {x}.5 {y0 + 5}.5 {z0 + 8}.5 {{UUID:[I;14100,0,{n},1],Fixed:1b{facing}}}',
+                    expect_result=1),
+                cmd(f'/data get entity 00003714-0000-0000-0000-{n:04x}00000001 Rotation'),
+                cmd(f'/data get entity 00003714-0000-0000-0000-{n:04x}00000001 Facing')]
+    return ops + setup(f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
+                       f'/fill {x0} {y0} {z0} {x0 + 15} {y0 + 8} {z0 + 15} air', f'/forceload remove {x0} {z0}')
 
 def groups():
     try:
@@ -7792,9 +7795,9 @@ def groups():
         ('piston mob bounce', piston_mob_bounce()),
         ('primed tnt box', primed_tnt_box()),
         ('primed tnt fall', primed_tnt_fall()),
+        ('item frame rotation', item_frame_rotation()),
         ('dispensed item escape', dispensed_item_escape()),
         ('command block last output', command_block_last_output()),
-        ('crafter triggered int', crafter_triggered_int()),
         ('glide fall accumulation', glide_fall_accumulation()),
         ('living short timers', living_short_timers()),
         ('projectile fall distance', projectile_fall_distance()),
