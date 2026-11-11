@@ -7583,34 +7583,22 @@ def dispensed_item_escape():
                        f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0} {z0 + 15} air', f'/forceload remove {x0} {z0}')
 
 
-def explosion_player_decorations():
-    """#11330: with `mob_griefing` off, `BlockAttachedEntity.hurtServer` and `ArmorStand.hurtServer` refuse a
-    blast whose causing entity is a mob, but a player's primed TNT (its `owner`) is no mob: it still breaks an
-    item frame and an armor stand, as an ownerless TNT does."""
+def vex_no_gravity():
+    """#13849: `Vex.tick` calls `setNoGravity(true)` on every tick, AI or not, so a vex that ticked once saves
+    `NoGravity: 1b`; before its first tick it saves none."""
     # Entities tick once the forced chunk's 2-column neighbourhood is loaded (ChunkMap.prepareEntityTickingChunk).
-    x0, y0, z0 = 4096 - 448, 260, 3584
+    x0, y0, z0 = 4096 - 192, 270, 3584
     ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks',
             'chunks': [[(x0 >> 4) + i, (z0 >> 4) + k] for i in range(-2, 3) for k in range(-2, 3)]},
-           cmd('/gamerule mob_griefing false', False), cmd('/tick freeze', False)]
-    near = f'x={x0},y={y0 - 4},z={z0},dx=16,dy=16,dz=16'
-    for owned in (False, True):
-        ops += [cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 6} {z0 + 15} air', False),
-                cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} bedrock', False),
-                cmd(f'/fill {x0 + 6} {y0} {z0 + 7} {x0 + 10} {y0 + 2} {z0 + 7} bedrock', False),
-                cmd(f'/summon item_frame {x0 + 8}.5 {y0 + 1}.5 {z0 + 8}.03125 {{Facing:3b,Tags:["blast_deco"]}}',
-                    expect_result=1),
-                cmd(f'/summon armor_stand {x0 + 9}.5 {y0} {z0 + 9}.5 {{NoGravity:1b,Tags:["blast_deco"]}}',
-                    expect_result=1),
-                cmd(f'/summon tnt {x0 + 8}.5 {y0} {z0 + 10}.5 {{fuse:1,Tags:["deco_tnt"]}}', expect_result=1)]
-        if owned:
-            ops.append(cmd('/data modify entity @e[type=tnt,tag=deco_tnt,limit=1] owner set from entity @p UUID'))
-        ops += [cmd(f'/execute if entity @e[tag=blast_deco,{near}]'),
-                cmd('/tick unfreeze', False), {'op': 'tick', 'n': 2}, cmd('/tick freeze', False),
-                cmd(f'/execute if entity @e[type=item_frame,tag=blast_deco,{near}]'),
-                cmd(f'/execute if entity @e[type=armor_stand,tag=blast_deco,{near}]'),
-                cmd(f'/kill @e[type=!player,{near}]', False)]
-    return ops + setup('/gamerule mob_griefing true', '/tick unfreeze',
-                       f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 6} {z0 + 15} air', f'/forceload remove {x0} {z0}')
+           cmd('/tick freeze', False)]
+    for n, fields in enumerate(['NoAI:1b,PersistenceRequired:1b', 'NoAI:1b,PersistenceRequired:1b,NoGravity:0b'], 1):
+        ops += [cmd(f'/summon vex {x0 + 4 * n}.5 {y0} {z0 + 8}.5 {{UUID:[I;14200,0,{n},1],{fields}}}', expect_result=1),
+                cmd(f'/data get entity 00003778-0000-0000-0000-{n:04x}00000001 NoGravity')]
+    ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 1}, cmd('/tick freeze', False)]
+    for n in (1, 2):
+        ops.append(cmd(f'/data get entity 00003778-0000-0000-0000-{n:04x}00000001 NoGravity'))
+    return ops + setup('/tick unfreeze', f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
+                       f'/forceload remove {x0} {z0}')
 
 def groups():
     try:
@@ -7808,7 +7796,7 @@ def groups():
         ('primed tnt fall', primed_tnt_fall()),
         ('dispensed item escape', dispensed_item_escape()),
         ('command block last output', command_block_last_output()),
-        ('explosion player decorations', explosion_player_decorations()),
+        ('vex no gravity', vex_no_gravity()),
         ('glide fall accumulation', glide_fall_accumulation()),
         ('living short timers', living_short_timers()),
         ('projectile fall distance', projectile_fall_distance()),
