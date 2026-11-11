@@ -565,8 +565,9 @@ mod tests {
         assert!(out.contains("vec4 blur_hz_Sampler1(vec2 uv)"));
         assert!(out.contains("blur_hz_Sampler0(uv)"));
         assert!(out.contains("blur_hz_Sampler1(uv + 1.0)"));
-        // One copy per sampler, not per call.
-        assert_eq!(out.matches("vec4 blur_hz_Sampler0(").count(), 1);
+        // One copy per sampler, not per call (and its prototype, from the prototype above).
+        assert_eq!(out.matches("vec4 blur_hz_Sampler0(vec2 uv) {").count(), 1);
+        assert_eq!(out.matches("vec4 blur_hz_Sampler0(vec2 uv);").count(), 1);
     }
 
     #[test]
@@ -648,14 +649,14 @@ mod tests {
     }
 
     /// A pack's text is untrusted: a sampler declared inside the helper itself (and text that
-    /// isn't ASCII) must leave a shader the translator can refuse, never a panic.
+    /// isn't ASCII) gives edits that would overlap, so the shader is left as it is for the
+    /// translator to refuse: never a panic, never a half-rewritten shader.
     #[test]
     fn a_sampler_declared_inside_the_helper_never_panics() {
         let text = "vec4 tap(sampler2D s, vec2 uv) { é uniform sampler2D Sampler0; x return texture(s, uv); ééé }\n\
             void main() { fragColor = tap(Sampler0, vec2(0.0)); }\n";
         let out = specialize_sampler_params(text);
-        assert!(!out.contains("sampler2D s"), "{out}");
-        assert!(out.contains("tap_hz_Sampler0(vec2(0.0))"), "{out}");
+        assert_eq!(out, text);
     }
 
     /// Vanilla's `texture_sampling.glsl` shape: one overload calls the other with its own
