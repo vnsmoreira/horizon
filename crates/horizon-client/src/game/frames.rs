@@ -469,7 +469,10 @@ impl Game<'_> {
         diameter: f64,
         interaction: super::explosion::BlockInteraction,
     ) {
-        if self.blast_spares_decorations(interaction) {
+        // A blast that only a mob's cause keeps from hurting frames still
+        // pushes them off (`BlockAttachedEntity.push`), crediting no one.
+        let pushed = self.blast_only_pushes_hanging(interaction);
+        if self.blast_spares_decorations(interaction) && !pushed {
             return;
         }
         let mut i = 0;
@@ -480,15 +483,22 @@ impl Game<'_> {
                     .sqrt()
                     / diameter;
             let (kind, pos) = (self.item_frames[i].kind(), self.item_frames[i].pos);
+            let b = self.item_frames[i].bounds();
             if dist > 1.0
                 || self.item_frames[i].fixed
+                || (pushed && !self.blast_pushes(blast, diameter, c, b))
                 || self.hanging_break_cancelled(kind, pos, false)
             {
                 i += 1;
                 continue;
             }
             let mut f = self.item_frames.remove(i);
-            self.entity_killed_event_by(center(&f), self.explosion_kill_credit());
+            let credit = if pushed {
+                None
+            } else {
+                self.explosion_kill_credit()
+            };
+            self.entity_killed_event_by(center(&f), credit);
             self.audio
                 .play(&sound(&f, "break"), Some(center(&f)), 1.0, 1.0);
             self.drop_frame_items(&mut f, true, false);
