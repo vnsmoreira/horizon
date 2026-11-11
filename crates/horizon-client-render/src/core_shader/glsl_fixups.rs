@@ -5,8 +5,16 @@
 //! - an unsized array (`const float[] w = float[](...)`, `float w[] = ...`) takes the size its
 //!   initializer gives.
 
+/// The longest shader the rewrites read: vanilla's biggest core shader, includes expanded, is
+/// a few KiB. Their scans go back over the text, so a longer one (an untrusted pack's, its
+/// brackets unbalanced) is left as it was rather than freezing the game while it loads.
+const MAX_LEN: usize = 256 * 1024;
+
 /// `text` with both rewrites, where they apply; anything they can't follow is left as it was.
 pub(super) fn fixups(text: &str) -> String {
+    if text.len() > MAX_LEN {
+        return text.to_owned();
+    }
     size_unsized_arrays(&specialize_sampler_params(text))
 }
 
@@ -176,20 +184,23 @@ fn calls<'a>(
 /// parameter `s` leaves the swizzle `c.s` alone).
 fn replace_ident(text: &str, from: &str, to: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find(from) {
-        let before = rest[..at].trim_end().chars().next_back();
-        let joined = rest[..at].chars().next_back().is_some_and(is_ident);
-        let after = rest[at + from.len()..].chars().next();
-        out.push_str(&rest[..at]);
+    let mut done = 0;
+    while let Some(found) = text[done..].find(from) {
+        let at = done + found;
+        // What comes before is read in the whole text: a match right after another (`ss`)
+        // is part of that identifier too.
+        let before = text[..at].trim_end().chars().next_back();
+        let joined = text[..at].chars().next_back().is_some_and(is_ident);
+        let after = text[at + from.len()..].chars().next();
+        out.push_str(&text[done..at]);
         if joined || before == Some('.') || after.is_some_and(is_ident) {
             out.push_str(from);
         } else {
             out.push_str(to);
         }
-        rest = &rest[at + from.len()..];
+        done = at + from.len();
     }
-    out.push_str(rest);
+    out.push_str(&text[done..]);
     out
 }
 
@@ -543,7 +554,8 @@ fn size_unsized_arrays(text: &str) -> String {
         }
         let at = statement_start + empty + 1;
         text.replace_range(at..at + close, &size);
-        from = eq + 1;
+        // The declarator is before `=`, so `=` moved by what its size changed.
+        from = eq + 1 + size.len() - close;
     }
     text
 }
@@ -746,5 +758,34 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("bool same = a == b;"));
+    }
+
+    #[test]
+    fn a_wide_character_after_a_sized_array_never_panics() {
+        // Ten values make the size two digits, which moves the `=` two bytes right: the scan
+        // went on from where it used to be, inside the `é`.
+        let text = "float w[]\u{e9}= float[](0.,1.,2.,3.,4.,5.,6.,7.,8.,9.);\n";
+        assert_eq!(
+            size_unsized_arrays(text),
+            "float w[10]\u{e9}= float[10](0.,1.,2.,3.,4.,5.,6.,7.,8.,9.);\n"
+        );
+    }
+
+    #[test]
+    fn a_parameter_matched_twice_in_one_identifier_stays_whole() {
+        assert_eq!(replace_ident("c.ss + ss * s", "s", "t"), "c.ss + ss * t");
+        assert_eq!(replace_ident("brightness(s)", "s", "t"), "brightness(t)");
+    }
+
+    #[test]
+    fn a_shader_longer_than_the_rewrites_read_is_left_as_it_was() {
+        let shader = "uniform sampler2D Sampler0;\n\
+            vec4 f(sampler2D s) { return texture(s, vec2(0)); }\n\
+            void main() { f(Sampler0); }\n";
+        // Rewritten at its own length...
+        assert_ne!(fixups(shader), shader);
+        // ...and left alone once it is longer than the rewrites read.
+        let long = format!("{shader}{}", " ".repeat(MAX_LEN));
+        assert_eq!(fixups(&long), long);
     }
 }
