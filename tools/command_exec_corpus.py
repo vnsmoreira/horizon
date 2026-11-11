@@ -7716,6 +7716,243 @@ def item_frame_rotation():
                        f'/fill {x0} {y0} {z0} {x0 + 15} {y0 + 8} {z0 + 15} air', f'/forceload remove {x0} {z0}')
 
 
+def crafter_triggered_int():
+    """#13851: `CrafterBlockEntity` keeps `triggered` as the int it read (`containerData` slot 9) and writes it back;
+    `isTriggered` is only `== 1`. `getIntOr` reads a double as `DoubleTag.intValue`: floored, then saturated."""
+    x0, y0, z0 = 3296, 260, 3712
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]},
+           cmd('/tick freeze', False)]
+    for n, value in enumerate(('-1', '0', '1', '5', '-0.5d', '1.5d', '4294967297d'), 1):
+        x = x0 + 2 * n
+        ops += [cmd(f'/setblock {x} {y0} {z0 + 8} crafter{{triggered:{value}}}', expect_result=1),
+                cmd(f'/data get block {x} {y0} {z0 + 8} triggered')]
+    ops.append(cmd(f'/data merge block {x0 + 2} {y0} {z0 + 8} {{triggered:7}}'))
+    ops.append(cmd(f'/data get block {x0 + 2} {y0} {z0 + 8} triggered'))
+    return ops + setup('/tick unfreeze', f'/fill {x0} {y0} {z0} {x0 + 15} {y0} {z0 + 15} air',
+                       f'/forceload remove {x0} {z0}')
+
+
+def raw_entity_flags():
+    """#13853: `Entity.load` reads the flags with `getBooleanOr` and `saveWithoutId` writes each back as `1b` only
+    when true: a leash knot's or a marker's raw save normalizes them too."""
+    x0, y0, z0 = 4096 - 256, 260, 3584
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': [[x0 >> 4, z0 >> 4]]}]
+    subjects = [('leash_knot', 'NoGravity:-1b'), ('leash_knot', 'NoGravity:0b,Silent:3b'),
+                ('marker', 'Glowing:-1b,NoGravity:2b,data:{a:1}'), ('marker', 'Silent:0b')]
+    for n, (kind, fields) in enumerate(subjects, 1):
+        uuid = f'000037e8-0000-0000-0000-{n:04x}00000001'
+        ops += [cmd(f'/summon {kind} {x0 + 3 * n}.5 {y0}.5 {z0 + 8}.5 {{UUID:[I;14312,0,{n},1],{fields}}}',
+                    expect_result=1)]
+        for key in ('NoGravity', 'Silent', 'Glowing'):
+            ops.append(cmd(f'/data get entity {uuid} {key}'))
+    return ops + setup(f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
+                       f'/forceload remove {x0} {z0}')
+
+
+def vex_no_gravity():
+    """#13849: `Vex.tick` calls `setNoGravity(true)` on every tick, AI or not, so a vex that ticked once saves
+    `NoGravity: 1b`; before its first tick it saves none."""
+    # Entities tick once the forced chunk's 2-column neighbourhood is loaded (ChunkMap.prepareEntityTickingChunk).
+    x0, y0, z0 = 4096 - 192, 270, 3584
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks',
+            'chunks': [[(x0 >> 4) + i, (z0 >> 4) + k] for i in range(-2, 3) for k in range(-2, 3)]},
+           cmd('/tick freeze', False)]
+    for n, fields in enumerate(['NoAI:1b,PersistenceRequired:1b', 'NoAI:1b,PersistenceRequired:1b,NoGravity:0b'], 1):
+        ops += [cmd(f'/summon vex {x0 + 4 * n}.5 {y0} {z0 + 8}.5 {{UUID:[I;14200,0,{n},1],{fields}}}', expect_result=1),
+                cmd(f'/data get entity 00003778-0000-0000-0000-{n:04x}00000001 NoGravity')]
+    ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 1}, cmd('/tick freeze', False)]
+    for n in (1, 2):
+        ops.append(cmd(f'/data get entity 00003778-0000-0000-0000-{n:04x}00000001 NoGravity'))
+    return ops + setup('/tick unfreeze', f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
+                       f'/forceload remove {x0} {z0}')
+
+
+def explosion_player_decorations():
+    """#11330: with `mob_griefing` off, `BlockAttachedEntity.hurtServer` and `ArmorStand.hurtServer` refuse a
+    blast whose causing entity is a mob, but a player's primed TNT (its `owner`) is no mob: it still breaks an
+    item frame and an armor stand, as an ownerless TNT does. A TNT whose `owner` is a zombie's UUID is a mob's
+    blast (`getIndirectSourceEntity` is that zombie): `hurtServer` refuses it, so the armor stand and a minecart
+    (`VehicleEntity.ignoreExplosion`) stay, but its push (`BlockAttachedEntity.push`) still kills the frame, a
+    painting and a cushion."""
+    # Entities tick once the forced chunk's 2-column neighbourhood is loaded (ChunkMap.prepareEntityTickingChunk).
+    x0, y0, z0 = 4096 - 448, 260, 3584
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks',
+            'chunks': [[(x0 >> 4) + i, (z0 >> 4) + k] for i in range(-2, 3) for k in range(-2, 3)]},
+           cmd('/gamerule mob_griefing false', False), cmd('/tick freeze', False)]
+    near = f'x={x0},y={y0 - 4},z={z0},dx=16,dy=16,dz=16'
+    for owner in (None, '@p', 'zombie'):
+        ops += [cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 6} {z0 + 15} air', False),
+                cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} bedrock', False),
+                cmd(f'/fill {x0 + 6} {y0} {z0 + 7} {x0 + 10} {y0 + 2} {z0 + 7} bedrock', False),
+                cmd(f'/summon item_frame {x0 + 8}.5 {y0 + 1}.5 {z0 + 8}.03125 {{Facing:3b,Tags:["blast_deco"]}}',
+                    expect_result=1),
+                cmd(f'/summon armor_stand {x0 + 9}.5 {y0} {z0 + 9}.5 {{NoGravity:1b,Tags:["blast_deco"]}}',
+                    expect_result=1),
+                cmd(f'/summon minecart {x0 + 8}.5 {y0} {z0 + 12}.5 {{Tags:["blast_deco"]}}', expect_result=1),
+                cmd(f'/summon painting {x0 + 6}.5 {y0 + 1}.5 {z0 + 8}.03125 {{block_pos:[I;{x0 + 6},{y0 + 1},{z0 + 8}],'
+                    'facing:0b,variant:"minecraft:kebab",Tags:["blast_deco"]}', expect_result=1),
+                cmd(f'/summon cushion {x0 + 10}.5 {y0} {z0 + 9}.5 {{Tags:["blast_deco"]}}', expect_result=1),
+                cmd(f'/summon tnt {x0 + 8}.5 {y0} {z0 + 10}.5 {{fuse:1,Tags:["deco_tnt"]}}', expect_result=1)]
+        if owner == 'zombie':
+            ops.append(cmd(f'/summon zombie {x0 + 1}.5 {y0} {z0 + 1}.5 '
+                           f'{{NoAI:1b,Silent:1b,PersistenceRequired:1b,Tags:["deco_owner"]}}',
+                           expect_result=1))
+            owner = f'@e[type=zombie,tag=deco_owner,{near},limit=1]'
+        if owner:
+            ops.append(cmd(f'/data modify entity @e[type=tnt,tag=deco_tnt,limit=1] owner set from entity {owner} UUID'))
+        ops += [cmd(f'/execute if entity @e[tag=blast_deco,{near}]'),
+                cmd('/tick unfreeze', False), {'op': 'tick', 'n': 2}, cmd('/tick freeze', False),
+                cmd(f'/execute if entity @e[type=item_frame,tag=blast_deco,{near}]'),
+                cmd(f'/execute if entity @e[type=armor_stand,tag=blast_deco,{near}]'),
+                cmd(f'/execute if entity @e[type=minecart,tag=blast_deco,{near}]'),
+                cmd(f'/execute if entity @e[type=painting,tag=blast_deco,{near}]'),
+                cmd(f'/execute if entity @e[type=cushion,tag=blast_deco,{near}]'),
+                cmd(f'/kill @e[type=!player,{near}]', False), cmd(f'/kill @e[type=item,{near}]', False)]
+    return ops + setup('/gamerule mob_griefing true', '/tick unfreeze',
+                       f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 6} {z0 + 15} air', f'/forceload remove {x0} {z0}')
+
+
+def explosion_creaking_heart_experience():
+    """#11330: `CreakingHeartBlock.onExplosionHit` awards a natural heart's experience (`tryAwardExperience`)
+    when the blast's indirect source is a player (a primed TNT's `owner`); an ownerless blast awards none. The
+    amount is random (20 to 24), so only whether orbs came out is compared. A creative owner gets none
+    (`preventsBlockDrops`), so the player is in survival for the owned blasts, then back in creative. A TNT
+    whose `owner` is a zombie's UUID is no player's (none), and with `block_drops` off `popExperience` drops
+    nothing."""
+    # Entities tick once the forced chunk's 2-column neighbourhood is loaded (ChunkMap.prepareEntityTickingChunk).
+    x0, y0, z0 = 4096 - 416, 260, 3584
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks',
+            'chunks': [[(x0 >> 4) + i, (z0 >> 4) + k] for i in range(-2, 3) for k in range(-2, 3)]},
+           cmd('/tick freeze', False)]
+    near = f'x={x0},y={y0 - 4},z={z0},dx=16,dy=16,dz=16'
+    for owner, mode, drops in ((None, 'survival', True), ('@p', 'creative', True), ('@p', 'survival', True),
+                               ('zombie', 'survival', True), ('@p', 'survival', False)):
+        ops += [cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 6} {z0 + 15} air', False),
+                cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} bedrock', False),
+                cmd(f'/setblock {x0 + 8} {y0} {z0 + 8} creaking_heart[natural=true]', expect_result=1),
+                cmd(f'/summon tnt {x0 + 8}.5 {y0 + 1} {z0 + 8}.5 {{fuse:1,Tags:["heart_tnt"]}}', expect_result=1)]
+        if owner == 'zombie':
+            ops.append(cmd(f'/summon zombie {x0 + 1}.5 {y0} {z0 + 1}.5 '
+                           f'{{NoAI:1b,Silent:1b,PersistenceRequired:1b,Tags:["heart_owner"]}}',
+                           expect_result=1))
+            owner = f'@e[type=zombie,tag=heart_owner,{near},limit=1]'
+        if owner:
+            ops.append(cmd(f'/data modify entity @e[type=tnt,tag=heart_tnt,limit=1] owner set from entity {owner} UUID'))
+        ops.append(cmd(f'/gamemode {mode} @p', False))
+        ops.append(cmd(f'/gamerule block_drops {str(drops).lower()}', False))
+        ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 2}, cmd('/tick freeze', False),
+                cmd(f'/execute if block {x0 + 8} {y0} {z0 + 8} air', expect_result=1),
+                cmd(f'/execute if entity @e[type=experience_orb,{near}]', comparison='positive_result'),
+                cmd(f'/kill @e[type=!player,{near}]', False), cmd(f'/kill @e[type=item,{near}]', False)]
+    return ops + setup('/gamemode creative @p', '/gamerule block_drops true', '/tick unfreeze',
+                       f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 6} {z0 + 15} air',
+                       f'/forceload remove {x0} {z0}')
+
+
+def explosion_player_experience():
+    """#11330: `Block.onExplosionHit` passes `dropExperience` = the blast's indirect source is a player (a primed
+    TNT's `owner`) to `spawnAfterBreak`, so blasted sculk pops its constant experience (catalyst 5, sculk 1) only
+    for a player's TNT, not for one whose `owner` is a zombie's UUID. Orbs may merge, so only whether any came
+    out is compared."""
+    # Entities tick once the forced chunk's 2-column neighbourhood is loaded (ChunkMap.prepareEntityTickingChunk).
+    x0, y0, z0 = 4096 - 384, 260, 3584
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks',
+            'chunks': [[(x0 >> 4) + i, (z0 >> 4) + k] for i in range(-2, 3) for k in range(-2, 3)]},
+           cmd('/tick freeze', False)]
+    near = f'x={x0},y={y0 - 4},z={z0},dx=16,dy=16,dz=16'
+    for owner in (None, '@p', 'zombie'):
+        ops += [cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 6} {z0 + 15} air', False),
+                cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} bedrock', False),
+                cmd(f'/setblock {x0 + 8} {y0} {z0 + 8} sculk_catalyst', expect_result=1),
+                cmd(f'/setblock {x0 + 7} {y0} {z0 + 8} sculk', expect_result=1),
+                cmd(f'/summon tnt {x0 + 8}.5 {y0 + 1} {z0 + 8}.5 {{fuse:1,Tags:["xp_tnt"]}}', expect_result=1)]
+        if owner == 'zombie':
+            ops.append(cmd(f'/summon zombie {x0 + 1}.5 {y0} {z0 + 1}.5 '
+                           f'{{NoAI:1b,Silent:1b,PersistenceRequired:1b,Tags:["xp_owner"]}}',
+                           expect_result=1))
+            owner = f'@e[type=zombie,tag=xp_owner,{near},limit=1]'
+        if owner:
+            ops.append(cmd(f'/data modify entity @e[type=tnt,tag=xp_tnt,limit=1] owner set from entity {owner} UUID'))
+        ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 2}, cmd('/tick freeze', False),
+                cmd(f'/execute if block {x0 + 8} {y0} {z0 + 8} air', expect_result=1),
+                cmd(f'/execute if entity @e[type=experience_orb,{near}]', comparison='positive_result'),
+                cmd(f'/kill @e[type=!player,{near}]', False), cmd(f'/kill @e[type=item,{near}]', False)]
+    return ops + setup('/tick unfreeze', f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 6} {z0 + 15} air',
+                       f'/forceload remove {x0} {z0}')
+
+
+def painting_saved_ground():
+    """#14543: `Entity.load` reads `OnGround` (`getBooleanOr`) and `fall_distance`, and `saveWithoutId` writes
+    them back; `BlockAttachedEntity.tick` never moves a painting nor runs `baseTick`, so both keep what was loaded."""
+    # Entities tick once the forced chunk's 2-column neighbourhood is loaded (ChunkMap.prepareEntityTickingChunk).
+    x0, y0, z0 = 4096 - 128, 260, 3584
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks',
+            'chunks': [[(x0 >> 4) + i, (z0 >> 4) + k] for i in range(-2, 3) for k in range(-2, 3)]},
+           cmd('/tick freeze', False)]
+    subjects = ['OnGround:1b', 'OnGround:0b', 'OnGround:3b', 'fall_distance:2.5d',
+                'OnGround:1b,fall_distance:7.0d', 'Tags:["plain"]']
+    for n, fields in enumerate(subjects, 1):
+        ops.append(cmd(f'/summon painting {x0 + 2 * n}.5 {y0} {z0 + 8}.5 {{UUID:[I;14543,0,{n},1],{fields}}}',
+                       expect_result=1))
+
+    def reads():
+        for n in range(1, len(subjects) + 1):
+            for key in ('OnGround', 'fall_distance'):
+                ops.append(cmd(f'/data get entity 000038cf-0000-0000-0000-{n:04x}00000001 {key}'))
+
+    reads()
+    ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 2}, cmd('/tick freeze', False)]
+    reads()
+    return ops + setup('/tick unfreeze', f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
+                       f'/forceload remove {x0} {z0}')
+
+
+def end_crystal_saved_fall():
+    """#14671: `Entity.load` reads `OnGround` (`getBooleanOr`) and `fall_distance`, and `saveWithoutId` writes them
+    back; `EndCrystal.tick` never moves the crystal nor runs `baseTick`, so both keep what was loaded, through a save
+    and a reload of the chunk too. Its `applyEffectsFromBlocks` still runs: a cobweb in its box makes it stuck
+    (`makeStuckInBlock`), which resets the fall distance; so does powder snow, whose inside shape is 0.9 tall for a
+    fall over 2.5. A crystal summoned where a loaded one was killed starts from nothing, and `/tp` grounds one."""
+    # Entities tick once the forced chunk's 2-column neighbourhood is loaded (ChunkMap.prepareEntityTickingChunk).
+    x0, y0, z0 = 4096 - 160, 260, 3584
+    ring = [[(x0 >> 4) + i, (z0 >> 4) + k] for i in range(-2, 3) for k in range(-2, 3)]
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': ring}]
+    subjects = ['fall_distance:-2.5d', 'OnGround:1b', 'OnGround:3b,fall_distance:4.0d', 'ShowBottom:0b']
+    for n, fields in enumerate(subjects, 1):
+        ops.append(cmd(f'/summon end_crystal {x0 + 3 * n}.5 {y0} {z0 + 8}.5 {{UUID:[I;14671,0,{n},1],{fields}}}',
+                       expect_result=1))
+    ops += [cmd(f'/setblock {x0 + 8} {y0 + 1} {z0 + 12} cobweb', expect_result=1),
+            cmd(f'/summon end_crystal {x0 + 8}.5 {y0} {z0 + 12}.5 {{UUID:[I;14671,0,5,1],fall_distance:4.0d}}',
+                expect_result=1)]
+    # Powder snow under a crystal at y + 0.95: above the 0.9 shape a 4.0 fall keeps, a 2.0 fall is in the block.
+    for n, x, fall in ((7, x0 + 3, '4.0d'), (8, x0 + 11, '2.0d')):
+        ops += [cmd(f'/setblock {x} {y0} {z0 + 4} powder_snow', expect_result=1),
+                cmd(f'/summon end_crystal {x}.5 {y0}.95 {z0 + 4}.5 {{UUID:[I;14671,0,{n},1],fall_distance:{fall}}}',
+                    expect_result=1)]
+
+    def reads(ids=(1, 2, 3, 4, 5, 7, 8)):
+        for n in ids:
+            for key in ('OnGround', 'fall_distance'):
+                ops.append(cmd(f'/data get entity 0000394f-0000-0000-0000-{n:04x}00000001 {key}'))
+
+    reads()
+    ops.append({'op': 'tick', 'n': 2})
+    reads()
+    # The chunk saves and drops its entities, then loads them back.
+    ops += [cmd(f'/forceload remove {x0} {z0}', False), {'op': 'tick', 'n': 60},
+            {**cmd(f'/execute unless loaded {x0} {y0} {z0}', expect_result=1), 'guard': True},
+            cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': ring}]
+    reads()
+    # A new crystal where the third (OnGround:3b, fall_distance:4.0d) was.
+    ops += [cmd('/kill 0000394f-0000-0000-0000-000300000001', False),
+            cmd(f'/summon end_crystal {x0 + 9}.5 {y0} {z0 + 8}.5 {{UUID:[I;14671,0,6,1]}}', expect_result=1)]
+    ops.append(cmd(f'/tp 0000394f-0000-0000-0000-000100000001 {x0 + 3}.5 {y0 + 1} {z0 + 8}.5', False))
+    reads((1, 6))
+    return ops + setup(f'/kill @e[type=end_crystal,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
+                       f'/setblock {x0 + 8} {y0 + 1} {z0 + 12} air', f'/setblock {x0 + 3} {y0} {z0 + 4} air',
+                       f'/setblock {x0 + 11} {y0} {z0 + 4} air', f'/forceload remove {x0} {z0}')
+
+
 def groups():
     try:
         from .spectral_duration_corpus import cases as spectral_saved_duration
@@ -7911,9 +8148,17 @@ def groups():
         ('piston mob bounce', piston_mob_bounce()),
         ('primed tnt box', primed_tnt_box()),
         ('primed tnt fall', primed_tnt_fall()),
+        ('end crystal saved fall', end_crystal_saved_fall()),
+        ('painting saved ground', painting_saved_ground()),
         ('item frame rotation', item_frame_rotation()),
         ('dispensed item escape', dispensed_item_escape()),
         ('command block last output', command_block_last_output()),
+        ('explosion player experience', explosion_player_experience()),
+        ('explosion creaking heart experience', explosion_creaking_heart_experience()),
+        ('explosion player decorations', explosion_player_decorations()),
+        ('vex no gravity', vex_no_gravity()),
+        ('raw entity flags', raw_entity_flags()),
+        ('crafter triggered int', crafter_triggered_int()),
         ('comparator setblock output', comparator_setblock_output()),
         ('glide fall accumulation', glide_fall_accumulation()),
         ('living short timers', living_short_timers()),
