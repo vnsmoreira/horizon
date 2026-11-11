@@ -7583,33 +7583,29 @@ def dispensed_item_escape():
                        f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0} {z0 + 15} air', f'/forceload remove {x0} {z0}')
 
 
-def end_crystal_saved_fall():
-    """#14671: `Entity.load` reads `OnGround` (`getBooleanOr`) and `fall_distance`, and `saveWithoutId` writes them
-    back; `EndCrystal.tick` never moves the crystal nor runs `baseTick`, so both keep what was loaded, through a save
-    and a reload of the chunk too."""
+def painting_saved_ground():
+    """#14543: `Entity.load` reads `OnGround` (`getBooleanOr`) and `fall_distance`, and `saveWithoutId` writes
+    them back; `BlockAttachedEntity.tick` never moves a painting nor runs `baseTick`, so both keep what was loaded."""
     # Entities tick once the forced chunk's 2-column neighbourhood is loaded (ChunkMap.prepareEntityTickingChunk).
-    x0, y0, z0 = 4096 - 160, 260, 3584
-    ring = [[(x0 >> 4) + i, (z0 >> 4) + k] for i in range(-2, 3) for k in range(-2, 3)]
-    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': ring}]
-    subjects = ['fall_distance:-2.5d', 'OnGround:1b', 'OnGround:3b,fall_distance:4.0d', 'ShowBottom:0b']
+    x0, y0, z0 = 4096 - 128, 260, 3584
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks',
+            'chunks': [[(x0 >> 4) + i, (z0 >> 4) + k] for i in range(-2, 3) for k in range(-2, 3)]},
+           cmd('/tick freeze', False)]
+    subjects = ['OnGround:1b', 'OnGround:0b', 'OnGround:3b', 'fall_distance:2.5d',
+                'OnGround:1b,fall_distance:7.0d', 'Tags:["plain"]']
     for n, fields in enumerate(subjects, 1):
-        ops.append(cmd(f'/summon end_crystal {x0 + 3 * n}.5 {y0} {z0 + 8}.5 {{UUID:[I;14671,0,{n},1],{fields}}}',
+        ops.append(cmd(f'/summon painting {x0 + 2 * n}.5 {y0} {z0 + 8}.5 {{UUID:[I;14543,0,{n},1],{fields}}}',
                        expect_result=1))
 
     def reads():
         for n in range(1, len(subjects) + 1):
             for key in ('OnGround', 'fall_distance'):
-                ops.append(cmd(f'/data get entity 0000394f-0000-0000-0000-{n:04x}00000001 {key}'))
+                ops.append(cmd(f'/data get entity 000038cf-0000-0000-0000-{n:04x}00000001 {key}'))
 
     reads()
-    ops.append({'op': 'tick', 'n': 2})
+    ops += [cmd('/tick unfreeze', False), {'op': 'tick', 'n': 2}, cmd('/tick freeze', False)]
     reads()
-    # The chunk saves and drops its entities, then loads them back.
-    ops += [cmd(f'/forceload remove {x0} {z0}', False), {'op': 'tick', 'n': 60},
-            {**cmd(f'/execute unless loaded {x0} {y0} {z0}', expect_result=1), 'guard': True},
-            cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': ring}]
-    reads()
-    return ops + setup(f'/kill @e[type=end_crystal,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
+    return ops + setup('/tick unfreeze', f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=32,dz=16]',
                        f'/forceload remove {x0} {z0}')
 
 def groups():
@@ -7806,7 +7802,7 @@ def groups():
         ('piston mob bounce', piston_mob_bounce()),
         ('primed tnt box', primed_tnt_box()),
         ('primed tnt fall', primed_tnt_fall()),
-        ('end crystal saved fall', end_crystal_saved_fall()),
+        ('painting saved ground', painting_saved_ground()),
         ('dispensed item escape', dispensed_item_escape()),
         ('command block last output', command_block_last_output()),
         ('glide fall accumulation', glide_fall_accumulation()),
