@@ -172,8 +172,39 @@ fn calls<'a>(
     out
 }
 
+/// Every `from` standing as an identifier on its own, but not a member after a `.` (a
+/// parameter `s` leaves the swizzle `c.s` alone).
 fn replace_ident(text: &str, from: &str, to: &str) -> String {
-    super::replace_ident(text, from, to)
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(from) {
+        let before = rest[..at].trim_end().chars().next_back();
+        let joined = rest[..at].chars().next_back().is_some_and(is_ident);
+        let after = rest[at + from.len()..].chars().next();
+        out.push_str(&rest[..at]);
+        if joined || before == Some('.') || after.is_some_and(is_ident) {
+            out.push_str(from);
+        } else {
+            out.push_str(to);
+        }
+        rest = &rest[at + from.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A body with its sampler parameters reading `chosen`, all at once: a parameter named like
+/// another's sampler (`mix2(sampler2D Sampler0, sampler2D Sampler1)` called with them swapped)
+/// still reads its own.
+fn read_samplers(body: &str, params: &[(usize, String)], chosen: &[String]) -> String {
+    let mut body = body.to_owned();
+    for (n, (_, param)) in params.iter().enumerate() {
+        body = replace_ident(&body, param, &format!("hz_sampler_param_{n}"));
+    }
+    for (n, sampler) in chosen.iter().enumerate().take(params.len()) {
+        body = replace_ident(&body, &format!("hz_sampler_param_{n}"), sampler);
+    }
+    body
 }
 
 /// The byte after `uniform sampler2D <name>;`, where the shader declares that sampler.
@@ -198,9 +229,7 @@ fn sampler_declaration_end(text: &str, name: &str) -> Option<usize> {
             continue;
         }
         let after = ident[len..].trim_start();
-        // A declaration at the shader's top level, not one inside a function's braces.
-        let depth = text[..at].matches('{').count() as i64 - text[..at].matches('}').count() as i64;
-        if after.starts_with(';') && depth == 0 {
+        if after.starts_with(';') {
             return Some(text.len() - after.len() + 1);
         }
     }
@@ -315,10 +344,7 @@ fn specialize_sampler_params(text: &str) -> String {
             Some((body, found))
         };
         let specialize = |g: &SamplerFn, chosen: &[String]| {
-            let mut body = g.body.as_deref().unwrap_or_default().to_owned();
-            for ((_, param), sampler) in g.samplers.iter().zip(chosen) {
-                body = replace_ident(&body, param, sampler);
-            }
+            let body = read_samplers(g.body.as_deref().unwrap_or_default(), &g.samplers, chosen);
             rewrite_own_calls(&body)
         };
         let same: Vec<&SamplerFn> = functions.iter().filter(|g| g.name == f.name).collect();
@@ -628,7 +654,7 @@ mod tests {
         let text = "vec4 tap(sampler2D s, vec2 uv) { é uniform sampler2D Sampler0; x return texture(s, uv); ééé }\n\
             void main() { fragColor = tap(Sampler0, vec2(0.0)); }\n";
         let out = specialize_sampler_params(text);
-        assert!(out.is_char_boundary(out.len()));
+        assert!(!out.contains("sampler2D s"), "{out}");
         assert!(out.contains("tap_hz_Sampler0(vec2(0.0))"), "{out}");
     }
 
@@ -678,6 +704,25 @@ mod tests {
             .find("vec4 tap_hz_Sampler0(vec2 uv) { return texture(Sampler0, uv); }")
             .expect("definition copy");
         assert!(prototype < call && call < definition, "{out}");
+    }
+
+    /// Parameters named like the samplers they are passed, swapped, still read their own; and a
+    /// parameter `s` leaves the swizzle `c.s` alone.
+    #[test]
+    fn sampler_parameters_are_replaced_at_once_and_not_as_members() {
+        let text = "uniform sampler2D Sampler0;\nuniform sampler2D Sampler1;\n\
+            vec4 mix2(sampler2D Sampler0, sampler2D Sampler1, vec2 uv) { return texture(Sampler0, uv) - texture(Sampler1, uv); }\n\
+            vec4 swz(sampler2D s, vec2 uv) { vec4 c = texture(s, uv); return vec4(c.s, c.t, 0.0, 1.0); }\n\
+            void main() { vec4 a = mix2(Sampler1, Sampler0, uv) + swz(Sampler0, uv); }\n";
+        let out = specialize_sampler_params(text);
+        assert!(
+            out.contains("{ return texture(Sampler1, uv) - texture(Sampler0, uv); }"),
+            "{out}"
+        );
+        assert!(
+            out.contains("{ vec4 c = texture(Sampler0, uv); return vec4(c.s, c.t, 0.0, 1.0); }"),
+            "{out}"
+        );
     }
 
     #[test]
